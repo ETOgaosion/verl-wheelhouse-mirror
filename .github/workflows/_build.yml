@@ -11,7 +11,7 @@ on:
   workflow_call:
     inputs:
       component:
-        description: "Component name from versions.yaml (e.g. vllm)"
+        description: "Component name from versions.yaml (e.g. apex)"
         required: true
         type: string
       path:
@@ -89,13 +89,13 @@ on:
       BYTED_PROXY:
         description: >-
           Optional HTTP(S) egress proxy URL for self-hosted runners (e.g.
-          vllm/sglang). When set, GitHub-bound transfers on self-hosted runners
-          - workflow artifact upload, release asset upload, and the Actions
-          resumable build cache - are routed through it, since those runners'
-          direct egress to GitHub is slow and prone to hanging. Only forwarded
-          by the vllm/sglang workflows (and the build-all/release sweeps that
-          also build them). The steps below gate on
-          runner.environment == 'self-hosted', so it is always a no-op on
+          apex/transformer-engine). When set, GitHub-bound transfers on
+          self-hosted runners - workflow artifact upload, release asset upload,
+          and the Actions resumable build cache - are routed through it, since
+          those runners' direct egress to GitHub is slow and prone to hanging.
+          Only forwarded by the apex/transformer-engine workflows (and the
+          build-all/release sweeps that also build them). The steps below gate
+          on runner.environment == 'self-hosted', so it is always a no-op on
           GitHub-hosted runners even if forwarded.
         required: false
 
@@ -119,10 +119,10 @@ jobs:
 
       - name: Checkout ${{ inputs.component }} @ ${{ inputs.ref }}
         run: |
-          # inputs.path is the build working directory, which is either a
-          # submodule root (e.g. "vllm") or a subdirectory within one (e.g.
-          # "sglang/sgl-kernel", which lives inside the "sglang" submodule -
-          # sgl-kernel isn't a submodule in its own right). `git submodule
+          # inputs.path is the build working directory, which is usually a
+          # submodule root (e.g. "apex") but is allowed to be a subdirectory
+          # within one, for projects whose buildable extension lives in a
+          # subdir that isn't a submodule in its own right. `git submodule
           # update -- <pathspec>` only recognizes paths registered in
           # .gitmodules, so walk up from inputs.path to find the nearest
           # registered submodule root.
@@ -141,10 +141,10 @@ jobs:
           # This decouples version bumps from the submodule pointer commit.
           #
           # --force throughout: self-hosted runners (see runs_on in
-          # versions.yaml, e.g. vllm/sglang) reuse their workspace
-          # across runs, and build scripts rewrite tracked files *inside* the
-          # submodule - e.g. vllm.sh runs use_existing_torch.py, which strips
-          # torch== pins out of pyproject.toml and requirements/**/*.{txt,in}.
+          # versions.yaml, e.g. apex/transformer-engine) reuse their workspace
+          # across runs, and a build can leave tracked files *inside* the
+          # submodule modified - generated sources, in-tree build artifacts, or
+          # a build script rewriting the project's own requirement pins.
           # The checkout above runs with submodules:false, so it only cleans
           # the superproject and never descends into the submodule's working
           # tree; a previous build's edits therefore survive on disk and make
@@ -178,13 +178,19 @@ jobs:
           git checkout --detach --force FETCH_HEAD
           git submodule update --init --recursive --force --depth 1
 
+      # Both steps below only make sense on GitHub's throwaway VMs: the cleanup
+      # deletes preinstalled toolchains that belong to the host on a persistent
+      # self-hosted machine, and the swap file is there to survive nvcc's peak
+      # RSS on a 16 GB runner (the self-hosted machine has memory to spare and
+      # would just accumulate swap files across runs).
       - name: Free up disk space
+        if: runner.environment != 'self-hosted'
         run: |
           source ci/build_scripts/common.sh
           free_disk_space
 
       - name: Set up swap space
-        if: inputs.component != 'vllm' && inputs.component != 'sglang'
+        if: runner.environment != 'self-hosted'
         uses: pierotofy/set-swap-space@v1.0
         with:
           swap-size-gb: 10
@@ -244,8 +250,8 @@ jobs:
       - name: Restore resumable build cache
         uses: actions/cache/restore@v4
         env:
-          # Self-hosted runners (vllm/sglang) reach GitHub via BYTED_PROXY;
-          # empty = direct connection on GitHub-hosted runners / when unset.
+          # Self-hosted runners (apex/transformer-engine) reach GitHub via
+          # BYTED_PROXY; empty = direct connection on GitHub-hosted runners.
           HTTP_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
           HTTPS_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
         with:
@@ -266,14 +272,15 @@ jobs:
       - name: Remove stale wheel output from previous runs
         working-directory: ${{ inputs.path }}
         run: |
-          # Self-hosted runners (e.g. vllm, sglang) reuse their workspace
-          # across runs, and the build scripts emit into dist/ without clearing
-          # it first. Without this, a previous - possibly different-version -
-          # build's wheel lingers in dist/ and gets swept into the "Upload
-          # wheel(s) to release" step below (which globs dist/*.whl), e.g. a
-          # stale vllm-0.23.x wheel leaking into the vllm-v0.24.0 release. dist/
-          # holds only final build output, so removing it never affects the
-          # resumable build cache (that lives in build/).
+          # Self-hosted runners (e.g. apex, transformer-engine) reuse their
+          # workspace across runs, and the build scripts emit into dist/ without
+          # clearing it first. Without this, a previous - possibly
+          # different-version - build's wheel lingers in dist/ and gets swept
+          # into the "Upload wheel(s) to release" step below (which globs
+          # dist/*.whl), e.g. a stale transformer_engine-2.15 wheel leaking
+          # into the transformer-engine-v2.16.1 release. dist/ holds only final
+          # build output, so removing it never affects the resumable build
+          # cache (that lives in build/).
           rm -rf dist
 
       - name: Build wheel
@@ -308,8 +315,8 @@ jobs:
         if: always() && contains(fromJSON('["124", "137", "143"]'), steps.build_wheel.outputs.exit_code)
         uses: actions/cache/save@v4
         env:
-          # Self-hosted runners (vllm/sglang) reach GitHub via BYTED_PROXY;
-          # empty = direct connection on GitHub-hosted runners / when unset.
+          # Self-hosted runners (apex/transformer-engine) reach GitHub via
+          # BYTED_PROXY; empty = direct connection on GitHub-hosted runners.
           HTTP_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
           HTTPS_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
         with:
@@ -335,9 +342,9 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         env:
-          # Self-hosted runners (vllm/sglang) reach GitHub (and its Azure blob
-          # artifact backend) via BYTED_PROXY; empty = direct connection on
-          # GitHub-hosted runners / when unset.
+          # Self-hosted runners (apex/transformer-engine) reach GitHub (and its
+          # Azure blob artifact backend) via BYTED_PROXY; empty = direct
+          # connection on GitHub-hosted runners.
           HTTP_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
           HTTPS_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
         with:
@@ -349,8 +356,8 @@ jobs:
         if: inputs.upload-to-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Self-hosted runners (vllm/sglang) reach GitHub via BYTED_PROXY;
-          # empty = direct connection on GitHub-hosted runners / when unset.
+          # Self-hosted runners (apex/transformer-engine) reach GitHub via
+          # BYTED_PROXY; empty = direct connection on GitHub-hosted runners.
           HTTP_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
           HTTPS_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
         run: |
@@ -376,8 +383,8 @@ jobs:
         if: inputs.upload-to-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Self-hosted runners (vllm/sglang) reach GitHub via BYTED_PROXY;
-          # empty = direct connection on GitHub-hosted runners / when unset.
+          # Self-hosted runners (apex/transformer-engine) reach GitHub via
+          # BYTED_PROXY; empty = direct connection on GitHub-hosted runners.
           HTTP_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
           HTTPS_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
         run: |

@@ -106,7 +106,7 @@ def build_index(assets: List[WheelAsset], out_dir: Path) -> Dict[str, List[Wheel
     landing_body = (
         "    <h1>verl-wheelhouse</h1>\n"
         "    <p>Prebuilt CUDA wheels for apex, TransformerEngine, flash-attention, "
-        "flashinfer, sglang, sglang-kernel, and vllm, built by "
+        "flashinfer, and Megatron-Bridge, built by "
         '<a href="https://github.com/verl-project/verl">verl</a>\'s wheelhouse CI.</p>\n'
         "    <p>Install with:</p>\n"
         "    <pre>pip install --extra-index-url &lt;this-pages-url&gt;/simple/ &lt;package&gt;</pre>\n"

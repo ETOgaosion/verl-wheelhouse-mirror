@@ -2,9 +2,9 @@ name: "~Ensure release"
 
 # Reusable workflow: given one component name (or "all"), creates or
 # updates that component's persistent GitHub Release:
-#   tag:   "<component>-<ref>"                          e.g. "vllm-v0.23.0"
+#   tag:   "<component>-<ref>"              e.g. "transformer-engine-v2.16.1"
 #   title: "<component> <ref> - cu<cuda> py<python> torch<torch>[; ...]"
-#          e.g. "vllm v0.23.0 - cu13.0.2 py3.12 torch2.11.0"
+#          e.g. "transformer-engine v2.16.1 - cu13.0.2 py3.12 torch2.11.0"
 # (see ci/release_meta.py for the exact computation). The release is
 # created once per (component, ref) pair and reused - and its title kept in
 # sync - across every subsequent build of that same ref; bumping ref in

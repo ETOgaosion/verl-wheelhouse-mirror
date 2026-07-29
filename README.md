@@ -9,9 +9,10 @@ heavy native-extension dependencies of [verl](https://github.com/verl-project/ve
 | [TransformerEngine](https://github.com/NVIDIA/TransformerEngine) | `TransformerEngine` | PyTorch TE extension |
 | [flash-attention](https://github.com/Dao-AILab/flash-attention) | `flash-attention` | `flash_attn` |
 | [flashinfer](https://github.com/flashinfer-ai/flashinfer) | `flashinfer` | `flashinfer-python`, `flashinfer-cubin`, `flashinfer-jit-cache` |
-| [sglang](https://github.com/sgl-project/sglang) | `sglang/sgl-kernel` | `sglang-kernel` (compiled) + `sglang` (official PyPI wheel rehosted) |
-| [vllm](https://github.com/vllm-project/vllm) | `vllm` | `vllm` |
 | [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) | `Megatron-Bridge` | `megatron-bridge` (pure-Python `py3-none-any` wheel) |
+
+The rollout engines (`vllm`, `sglang`) are deliberately *not* built here -
+upstream's own published wheels are used instead.
 
 Build commands follow the exact flags used in verl's own
 [`docker/Dockerfile.stable.sglang`](https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.sglang)
@@ -25,8 +26,8 @@ resumable build caches).
 
 Wheels are published to [GitHub Releases](../../releases) - one persistent
 release per component, named after that component and its pinned dependency
-versions (e.g. `vllm v0.23.0 - cu13.0.2 py3.12 torch2.11.0`, tag
-`vllm-v0.23.0`) - and to a static [GitHub Pages](https://pages.github.com/)
+versions (e.g. `transformer-engine v2.16.1 - cu13.0.2 py3.12 torch2.11.0`, tag
+`transformer-engine-v2.16.1`) - and to a static [GitHub Pages](https://pages.github.com/)
 PEP 503 "simple" package index, so they're directly `pip install`-able.
 
 ## Repo layout
@@ -43,8 +44,6 @@ ci/
     transformer_engine.sh
     flash_attention.sh
     flashinfer.sh
-    sglang.sh
-    vllm.sh
     megatron_bridge.sh
 .github/workflows/
   _build.yml              # reusable single-combination build workflow
@@ -53,8 +52,6 @@ ci/
   build-transformer-engine.yml
   build-flash-attention.yml
   build-flashinfer.yml
-  build-sglang.yml
-  build-vllm.yml
   build-megatron-bridge.yml
   build-all.yml           # builds every component x every matrix combo
   release.yml             # on `v*` tag push: full-matrix build + upload
@@ -102,7 +99,7 @@ resulting matrix locally at any time (requires `pip install pyyaml`):
 
 ```bash
 python3 ci/generate_matrix.py --list-components
-python3 ci/generate_matrix.py --component vllm | python3 -m json.tool
+python3 ci/generate_matrix.py --component apex | python3 -m json.tool
 python3 ci/generate_matrix.py --component all
 ```
 
@@ -112,10 +109,10 @@ Every component gets its **own** GitHub Release - there is no single
 combined release for "the repo" as a whole. `ci/release_meta.py` computes,
 for a component and its currently-pinned `ref` in `versions.yaml`:
 
-- **tag**: `<component>-<ref>`, e.g. `vllm-v0.23.0`
+- **tag**: `<component>-<ref>`, e.g. `transformer-engine-v2.16.1`
 - **title**: `<component> <ref> - cu<cuda> py<python> torch<torch>[; ...]`
   (one `cu.. py.. torch..` segment per `build_matrix` entry), e.g.
-  `vllm v0.23.0 - cu13.0.2 py3.12 torch2.11.0`
+  `transformer-engine v2.16.1 - cu13.0.2 py3.12 torch2.11.0`
 
 The reusable `.github/workflows/_ensure_release.yml` workflow creates that
 release if it doesn't exist yet, or refreshes its title (in case
@@ -169,43 +166,42 @@ release):
 
 ```bash
 pip install --extra-index-url https://<owner>.github.io/<repo>/simple/ flash-attn
-pip install --extra-index-url https://<owner>.github.io/<repo>/simple/ vllm
+pip install --extra-index-url https://<owner>.github.io/<repo>/simple/ transformer-engine
 ```
 
 Or install a specific wheel directly from that component's
 [release page](../../releases) - look for the tag `<component>-<ref>`, e.g.
-`vllm-v0.23.0`.
+`transformer-engine-v2.16.1`.
 
 ## Caveats
 
-- **Build time on free runners.** `vllm` and `TransformerEngine` in
-  particular are large builds even with capped `MAX_JOBS`/arch lists. The
-  reusable workflow caps each build attempt at 5 hours (under GitHub's 6h
-  job limit) and saves a resumable build-cache tarball on timeout, so
-  re-running the workflow continues from where it left off - the same
-  tradeoff flash-attention's own CI makes.
-- **`runs-on` is a per-component input** (`versions.yaml`'s `runs_on`
-  field), so pointing a component at a bigger/self-hosted runner (and
-  bumping its `max_jobs` back up towards verl's own `128`/`256`) is a
-  one-line edit, no workflow changes required.
+- **Two components build on a self-hosted machine.** `apex` and
+  `TransformerEngine` are the heavy CUDA builds here, so their `runs_on`
+  points at a self-hosted runner (`[self-hosted, Linux, X64]`) and their
+  `max_jobs` is raised accordingly (32 and 16 - TransformerEngine multiplies
+  that by `NVTE_BUILD_THREADS_PER_JOB=4`). `flash-attention`, `flashinfer`
+  and `Megatron-Bridge` stay on free GitHub-hosted runners with capped
+  parallelism. `runs-on` and `max_jobs` are both plain per-component fields
+  in `versions.yaml`, so moving a component between the two (or dialing
+  parallelism up towards verl's own `128`/`256`) is a one-line edit with no
+  workflow changes.
+- **Build time on free runners.** Builds that stay on GitHub-hosted runners
+  are slow even with capped `MAX_JOBS`/arch lists. The reusable workflow caps
+  each build attempt at 5 hours (under GitHub's 6h job limit) and saves a
+  resumable build-cache tarball on timeout, so re-running the workflow
+  continues from where it left off - the same tradeoff flash-attention's own
+  CI makes.
 - **Self-hosted runners can route GitHub transfers through a proxy.** The
-  `vllm`/`sglang` builds run on self-hosted runners whose direct egress to
-  GitHub is slow and prone to hanging, which stalls the wheel/artifact and
-  release uploads (and the resumable build cache). Set an optional
-  `BYTED_PROXY` repository secret to an HTTP(S) egress proxy URL and those
-  transfers are routed through it. It only takes effect on self-hosted
-  runners (`runner.environment == 'self-hosted'`); GitHub-hosted builds
-  always use a direct connection, so leaving the secret unset is a no-op.
-  Only the self-hosted components' workflows forward it to the reusable
-  `_build.yml`: `build-vllm.yml`, `build-sglang.yml`, and the
-  `build-all.yml`/`release.yml` sweeps that also build vllm/sglang.
-- **The `sglang` component ships two wheels in one release.** Only
-  `sglang-kernel` (the CUDA extension) is compiled from source - that's the
-  CUDA/torch combo upstream PyPI doesn't publish. The main `sglang` package's
-  only compiled part is a CUDA-agnostic Rust frontend that upstream already
-  ships as portable manylinux wheels, so `sglang.sh` download-and-rehosts that
-  official wheel into the same `sglang-<ref>` release rather than rebuilding it
-  (the same download-and-vendor pattern used for flashinfer's companion wheels).
+  self-hosted machine's direct egress to GitHub is slow and prone to hanging,
+  which stalls the wheel/artifact and release uploads (and the resumable
+  build cache). Set an optional `BYTED_PROXY` repository secret to an HTTP(S)
+  egress proxy URL and those transfers are routed through it. It only takes
+  effect on self-hosted runners (`runner.environment == 'self-hosted'`);
+  GitHub-hosted builds always use a direct connection, so leaving the secret
+  unset is a no-op. Only the self-hosted components' workflows forward it to
+  the reusable `_build.yml`: `build-apex.yml`,
+  `build-transformer-engine.yml`, and the `build-all.yml`/`release.yml`
+  sweeps.
 - **`apex` tracks `master`** (both verl Dockerfiles build it unpinned), so it
   effectively behaves like a rolling release under the fixed tag
   `apex-master`; every other component tracks a specific tag and gets a fresh
@@ -213,6 +209,9 @@ Or install a specific wheel directly from that component's
 - **Old per-component releases aren't deleted automatically.** Bumping a
   `ref` starts a new release rather than replacing the old one, so the PEP
   503 index may list more than one version of a package (e.g. both
-  `vllm-v0.22.x` and `vllm-v0.23.0` wheels) until you manually delete the
-  stale release from the [releases page](../../releases) if that matters
-  for your use case.
+  `transformer-engine-v2.15` and `transformer-engine-v2.16.1` wheels) until
+  you manually delete the stale release from the
+  [releases page](../../releases) if that matters for your use case. The same
+  applies to the retired `vllm-*`/`sglang-*` releases: dropping those
+  components stops future builds but leaves their existing wheels published
+  and indexed until the releases are deleted by hand.

@@ -6,10 +6,10 @@ Each component gets its own persistent GitHub Release, keyed by the
 component's currently-pinned ref rather than by a shared "latest"/repo-level
 tag:
 
-    tag:   "<component>-<ref>"                     e.g. "vllm-v0.23.0"
+    tag:   "<component>-<ref>"                     e.g. "transformer-engine-v2.16.1"
     title: "<component> <ref> - cu<cuda> py<python> torch<torch>[; ...]"
            (one "cu.. py.. torch.." segment per versions.yaml build_matrix
-           entry) e.g. "vllm v0.23.0 - cu13.0.2 py3.12 torch2.11.0"
+           entry) e.g. "transformer-engine v2.16.1 - cu13.0.2 py3.12 torch2.11.0"
 
 Rebuilding the same ref re-uploads (--clobber) wheels onto the same
 release; bumping a component's ref in versions.yaml starts a brand new
@@ -19,9 +19,9 @@ load_versions/release_tag helpers so the tag computed here always matches
 the "release_tag" field _build.yml is given for that component's rows.
 
 Usage:
-    python ci/release_meta.py --component vllm
+    python ci/release_meta.py --component apex
     python ci/release_meta.py --component all
-    python ci/release_meta.py --component vllm --github-output
+    python ci/release_meta.py --component apex --github-output
 """
 
 from __future__ import annotations

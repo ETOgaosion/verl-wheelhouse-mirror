@@ -87,7 +87,7 @@ Worked checklist, using a hypothetical `xformers` component as the example:
    ```
 
 3. **Write `ci/build_scripts/xformers.sh`.** Use an existing script as a
-   template (`ci/build_scripts/vllm.sh` is a good default shape); every
+   template (`ci/build_scripts/apex.sh` is a good default shape); every
    script follows the same pattern:
 
    ```bash
@@ -111,15 +111,15 @@ Worked checklist, using a hypothetical `xformers` component as the example:
    relative to that CWD - the reusable workflow uploads `<path>/dist/*.whl`.
 
 4. **Copy a per-component workflow.** Duplicate
-   `.github/workflows/build-vllm.yml` to
+   `.github/workflows/build-flashinfer.yml` to
    `.github/workflows/build-xformers.yml` and adjust:
    - `name:` → `Build xformers`
    - the `paths:` entries → `versions.yaml`, `ci/build_scripts/common.sh`,
      `ci/build_scripts/xformers.sh`, `.github/workflows/_build.yml`,
      `.github/workflows/build-xformers.yml`
-   - the `--component vllm` argument in the `compute-matrix` job →
+   - the `--component flashinfer` argument in the `compute-matrix` job →
      `--component xformers`
-   - the `component: vllm` input under the `ensure-release` job → `component: xformers`
+   - the `component: flashinfer` input under the `ensure-release` job → `component: xformers`
 
    Everything else - `workflow_dispatch`, the reusable `_ensure_release.yml`
    call's structure, and the trailing `publish-index` job that runs after a
@@ -127,12 +127,11 @@ Worked checklist, using a hypothetical `xformers` component as the example:
    `ci/release_meta.py` will automatically compute `xformers`'s own release
    tag/title once its `components:` entry exists in `versions.yaml`.
 
-   `build-vllm.yml` also forwards a `secrets: { BYTED_PROXY: ... }` block to
-   `_build.yml`. That block is only needed for components built on a
-   **self-hosted** runner (like `vllm`/`sglang`), where it routes
+   If your new component's `runs_on` is **self-hosted**, copy
+   `.github/workflows/build-apex.yml` instead: it additionally forwards a
+   `secrets: { BYTED_PROXY: ... }` block to `_build.yml`, which routes
    otherwise-slow GitHub uploads through the optional `BYTED_PROXY` repo
-   secret. Keep it (and set the repo secret) if your new component's
-   `runs_on` is self-hosted; **drop it for a normal `ubuntu-*` component** -
+   secret. **Drop that block for a normal `ubuntu-*` component** -
    `_build.yml`'s `runner.environment == 'self-hosted'` proxy gate is a no-op
    on GitHub-hosted runners anyway.
 
@@ -160,10 +159,10 @@ where needed:
 
 | Consumer | Format | Handled by |
 |---|---|---|
-| apex, vllm | dotted + semicolons, e.g. `8.0;9.0;12.0` | used as-is |
+| apex | dotted + semicolons, e.g. `8.0;9.0;12.0` | used as-is |
 | flash-attention, TransformerEngine | undotted, e.g. `80;90;120` | `ci/build_scripts/common.sh`'s `arch_list_strip_dots` |
 | flashinfer | space-separated with PTX-family suffixes, e.g. `8.0 9.0a 12.0f` | given verbatim in `versions.yaml` (suffixes can't be derived mechanically) |
-| sglang (sgl-kernel) | n/a | set `torch_cuda_arch_list: null` - it hardcodes its own gencode flags |
+| Megatron-Bridge (pure-Python) | n/a | set `torch_cuda_arch_list: null` for components that build no CUDA code, or that hardcode their own gencode flags |
 
 ## See also
 

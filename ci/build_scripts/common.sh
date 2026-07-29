@@ -10,15 +10,31 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# maybe_sudo: run a privileged command through sudo only where that is both
+# needed and possible. GitHub-hosted runners build as an unprivileged user
+# with passwordless sudo; the self-hosted machine (apex, TransformerEngine)
+# builds as root in a container that has no sudo binary at all.
+# ---------------------------------------------------------------------------
+maybe_sudo() {
+  if [ "$(id -u)" -eq 0 ] || ! command -v sudo >/dev/null 2>&1; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # free_disk_space: same cleanup flash-attention's own _build.yml runs before
-# a CUDA build, to claw back space on standard GitHub-hosted runners.
+# a CUDA build, to claw back space on standard GitHub-hosted runners. Only
+# called for those (see _build.yml) - on the persistent self-hosted machine
+# these paths belong to the host, not to a throwaway VM image.
 # ---------------------------------------------------------------------------
 free_disk_space() {
   echo "::group::Free up disk space"
-  sudo rm -rf /usr/share/dotnet || true
-  sudo rm -rf /opt/ghc || true
-  sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-  sudo rm -rf /usr/local/lib/android || true
+  maybe_sudo rm -rf /usr/share/dotnet || true
+  maybe_sudo rm -rf /opt/ghc || true
+  maybe_sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+  maybe_sudo rm -rf /usr/local/lib/android || true
   echo "::endgroup::"
 }
 
@@ -36,10 +52,10 @@ install_cudnn() {
 
   echo "::group::Install cuDNN ${cuda_major}"
   wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${arch}/cuda-keyring_1.1-1_all.deb"
-  sudo dpkg -i cuda-keyring_1.1-1_all.deb
+  maybe_sudo dpkg -i cuda-keyring_1.1-1_all.deb
   rm -f cuda-keyring_1.1-1_all.deb
-  sudo apt-get update
-  sudo apt-get install -y --allow-downgrades --allow-change-held-packages \
+  maybe_sudo apt-get update
+  maybe_sudo apt-get install -y --allow-downgrades --allow-change-held-packages \
     "cudnn9-cuda-${cuda_major}"
   echo "::endgroup::"
 }
@@ -57,7 +73,7 @@ install_nccl() {
   cuda_short="$(echo "${CUDA_VERSION}" | cut -d. -f1,2)"
 
   echo "::group::Install NCCL (+cuda${cuda_short})"
-  sudo apt-get update
+  maybe_sudo apt-get update
   nccl_ver="$(
     apt-cache madison libnccl-dev 2>/dev/null \
       | grep "+cuda${cuda_short}" \
@@ -68,7 +84,7 @@ install_nccl() {
     echo "::error::No libnccl-dev package found for +cuda${cuda_short}" >&2
     exit 1
   fi
-  sudo apt-get install -y --no-install-recommends --allow-change-held-packages \
+  maybe_sudo apt-get install -y --no-install-recommends --allow-change-held-packages \
     "libnccl-dev=${nccl_ver}" "libnccl2=${nccl_ver}"
   echo "Installed libnccl-dev=${nccl_ver} libnccl2=${nccl_ver}"
   echo "::endgroup::"
@@ -78,27 +94,13 @@ install_nccl() {
 # arch_list_strip_dots: convert the canonical "8.0;9.0;10.0;12.0" arch list
 # into the undotted "80;90;100;120" form that flash-attention's
 # FLASH_ATTN_CUDA_ARCHS and TransformerEngine's NVTE_CUDA_ARCHS expect.
-# apex/vllm consume TORCH_CUDA_ARCH_LIST in the canonical dotted form
-# directly (no conversion needed), and flashinfer's list is given
-# pre-formatted in versions.yaml (with PTX-family suffix letters like
-# "9.0a"/"12.0f") since those can't be derived mechanically.
+# apex consumes TORCH_CUDA_ARCH_LIST in the canonical dotted form directly
+# (no conversion needed), and flashinfer's list is given pre-formatted in
+# versions.yaml (with PTX-family suffix letters like "9.0a"/"12.0f") since
+# those can't be derived mechanically.
 # ---------------------------------------------------------------------------
 arch_list_strip_dots() {
   echo "$1" | tr -d '.'
-}
-
-# ---------------------------------------------------------------------------
-# install_sgl_kernel_build_deps: sgl-kernel pulls in mscclpp via CMake, which
-# requires libnuma and libibverbs dev headers/libs. Mirrors sglang's CI apt
-# install list (scripts/ci/cuda/ci_install_dependency.sh) and the sgl-kernel
-# Dockerfile (numactl-devel, libibverbs).
-# ---------------------------------------------------------------------------
-install_sgl_kernel_build_deps() {
-  echo "::group::Install sgl-kernel build dependencies"
-  apt-get update
-  apt-get install -y --no-install-recommends \
-    libnuma-dev libibverbs-dev libibverbs1 ibverbs-providers ibverbs-utils pkg-config
-  echo "::endgroup::"
 }
 
 # ---------------------------------------------------------------------------
@@ -114,12 +116,9 @@ flashinfer_jit_cache_cu_index() {
 # ---------------------------------------------------------------------------
 # download_prebuilt_wheel: pip download a prebuilt wheel (wheels only, no deps)
 # with retry logic, writing the .whl into dest_dir. Used to vendor wheels this
-# repo intentionally does not build from source:
-#   - flashinfer's companion wheels (flashinfer-cubin / -jit-cache from
-#     flashinfer.ai; jit-cache is ~1.2 GB and that index can be flaky), and
-#   - the main `sglang` wheel (its only compiled part is a CUDA-agnostic Rust
-#     frontend, already published as portable manylinux wheels on PyPI - see
-#     ci/build_scripts/sglang.sh).
+# repo intentionally does not build from source - currently flashinfer's
+# companion wheels (flashinfer-cubin / -jit-cache from flashinfer.ai; jit-cache
+# is ~1.2 GB and that index can be flaky).
 # --only-binary=:all: guarantees we rehost the upstream binary wheel and never
 # silently fall back to building an sdist.
 # ---------------------------------------------------------------------------
@@ -164,151 +163,4 @@ export_extra_env() {
     export "${key}=${value}"
     echo "Exported ${key}=${value} (from extra_env)"
   done < <(echo "${EXTRA_ENV}" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
-}
-
-# ---------------------------------------------------------------------------
-# ensure_cuda_cccl_include_path: CUDA 13+ moved CCCL headers (cuda/atomic,
-# cuda/std/*, thrust, cub) under ${CUDA_HOME}/include/cccl/. nvcc adds this
-# automatically, but host C++ TUs built with g++ (e.g. mscclpp inside
-# sgl-kernel) need CPLUS_INCLUDE_PATH / C_INCLUDE_PATH set explicitly.
-# Mirrors sgl-kernel Dockerfile and flash-attention hopper/setup.py.
-# ---------------------------------------------------------------------------
-ensure_cuda_cccl_include_path() {
-  local cuda_home cccl_include="" candidate env_var current
-
-  cuda_home="${CUDA_HOME:-}"
-  if [ -z "${cuda_home}" ] && command -v nvcc >/dev/null 2>&1; then
-    cuda_home="$(dirname "$(dirname "$(command -v nvcc)")")"
-  fi
-  cuda_home="${cuda_home:-/usr/local/cuda}"
-
-  for candidate in \
-    "${cuda_home}/include/cccl" \
-    "${cuda_home}/targets/x86_64-linux/include/cccl"; do
-    if [ -d "${candidate}/cuda" ]; then
-      cccl_include="${candidate}"
-      break
-    fi
-  done
-
-  if [ -z "${cccl_include}" ]; then
-    echo "::warning::CCCL include dir not found under ${cuda_home}; CUDA 13+ host builds may fail" >&2
-    return 0
-  fi
-
-  for env_var in CPLUS_INCLUDE_PATH C_INCLUDE_PATH; do
-    current="${!env_var:-}"
-    if [[ ":${current}:" == *":${cccl_include}:"* ]]; then
-      continue
-    fi
-    if [ -n "${current}" ]; then
-      export "${env_var}=${cccl_include}:${current}"
-    else
-      export "${env_var}=${cccl_include}"
-    fi
-  done
-  echo "Prepended ${cccl_include} to CPLUS_INCLUDE_PATH and C_INCLUDE_PATH"
-}
-
-# ---------------------------------------------------------------------------
-# ensure_python_include_path: vllm's tools/build_deepgemm_C.py compiles
-# DeepGEMM's pybind11 `_C` extension with a bare `g++` invocation whose only
-# Python header dir comes from the target interpreter's
-# sysconfig.get_config_var('INCLUDEPY') (see cmake/external_projects/
-# deepgemm.cmake). GitHub's actions/setup-python CPython builds bake an
-# absolute INCLUDEPY of /opt/hostedtoolcache/Python/<ver>/x64/include/... into
-# _sysconfigdata at build time; on self-hosted runners (where the tool cache
-# actually lives under /actions-runner/_work/_tool/...) that baked path does
-# not exist, so g++ dies with "fatal error: Python.h: No such file or
-# directory" even though the headers ship right next to the interpreter.
-# sys.prefix/base_prefix - and therefore sysconfig.get_path('include') - are
-# recomputed from the interpreter's on-disk location at startup, so they still
-# resolve correctly; export that real, existing include dir on
-# CPLUS_INCLUDE_PATH/C_INCLUDE_PATH so g++ finds Python.h regardless of the
-# stale -I INCLUDEPY flag build_deepgemm_C.py passes.
-#
-# Prefer-first-existing order: get_path("include") (derived from the runtime-
-# resolved sys.base_prefix, and normally correct) > base_prefix/prefix guesses
-# > INCLUDEPY (the stale build-time value, kept last purely as a fallback). The
-# probe runs via `python -c` as a bash single-quoted string, so its Python body
-# uses double quotes only - an apostrophe there would prematurely close the
-# shell string (and a heredoc nested in $() mis-parses the same way).
-# ---------------------------------------------------------------------------
-ensure_python_include_path() {
-  local py_inc env_var current
-  py_inc="$(python -c '
-import os, sys, sysconfig
-ver = sysconfig.get_python_version()
-abi = sysconfig.get_config_var("abiflags") or ""
-candidates = [
-    sysconfig.get_path("include"),
-    os.path.join(sys.base_prefix, "include", "python" + ver + abi),
-    os.path.join(sys.prefix, "include", "python" + ver + abi),
-    sysconfig.get_config_var("INCLUDEPY"),
-]
-seen = set()
-for c in candidates:
-    if not c or c in seen:
-        continue
-    seen.add(c)
-    if os.path.exists(os.path.join(c, "Python.h")):
-        print(c)
-        break
-')"
-
-  if [ -z "${py_inc}" ]; then
-    echo "::warning::Could not locate a Python include dir containing Python.h; DeepGEMM _C build may fail" >&2
-    return 0
-  fi
-
-  for env_var in CPLUS_INCLUDE_PATH C_INCLUDE_PATH; do
-    current="${!env_var:-}"
-    if [[ ":${current}:" == *":${py_inc}:"* ]]; then
-      continue
-    fi
-    if [ -n "${current}" ]; then
-      export "${env_var}=${py_inc}:${current}"
-    else
-      export "${env_var}=${py_inc}"
-    fi
-  done
-  echo "Prepended ${py_inc} to CPLUS_INCLUDE_PATH and C_INCLUDE_PATH"
-}
-
-# ---------------------------------------------------------------------------
-# ensure_cuda_nvrtc_for_cmake: CMake FindCUDAToolkit looks for an unversioned
-# libnvrtc.so, but the cuda-nvrtc apt sub-package on GitHub runners only ships
-# libnvrtc.so.<major> (see vllm-project/vllm#29669). Point CMake at the
-# versioned library explicitly via CMAKE_ARGS (used by vllm's setup.py and
-# sgl-kernel's scikit-build-core/uv build).
-# ---------------------------------------------------------------------------
-ensure_cuda_nvrtc_for_cmake() {
-  if [[ "${CMAKE_ARGS:-}" == *"CUDA_nvrtc_LIBRARY"* ]]; then
-    return 0
-  fi
-
-  local cuda_home libdir nvrtc
-  cuda_home="${CUDA_HOME:-}"
-  if [ -z "${cuda_home}" ] && command -v nvcc >/dev/null 2>&1; then
-    cuda_home="$(dirname "$(dirname "$(command -v nvcc)")")"
-  fi
-  cuda_home="${cuda_home:-/usr/local/cuda}"
-
-  for libdir in "${cuda_home}/lib64" "${cuda_home}/targets/x86_64-linux/lib"; do
-    [ -d "${libdir}" ] || continue
-    if [ -e "${libdir}/libnvrtc.so" ]; then
-      nvrtc="${libdir}/libnvrtc.so"
-      break
-    fi
-    nvrtc="$(find "${libdir}" -maxdepth 1 -name 'libnvrtc.so.*' -type f -print 2>/dev/null | sort -V | tail -1)"
-    [ -n "${nvrtc}" ] && break
-  done
-
-  if [ -z "${nvrtc}" ]; then
-    echo "::warning::Could not locate libnvrtc under ${cuda_home}; vllm CMake may fail" >&2
-    return 0
-  fi
-
-  export CMAKE_ARGS="${CMAKE_ARGS:-} -DCUDA_nvrtc_LIBRARY=${nvrtc}"
-  echo "Set CMAKE_ARGS CUDA_nvrtc_LIBRARY=${nvrtc}"
 }

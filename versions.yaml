@@ -68,11 +68,11 @@ verl_reference_versions:
 #                  before running the build script (only TransformerEngine
 #                  requires this - apex only optionally uses cuDNN for a
 #                  couple of contrib extensions we don't build).
-# max_jobs:        parallel build jobs. Deliberately small (1-2) to fit the
-#                  free GitHub-hosted runners this pipeline targets by
-#                  default; verl's own Dockerfiles use 128/256 on much
-#                  larger build machines, so bump this per-component once
-#                  runs_on points at something bigger (see README.md).
+# max_jobs:        parallel build jobs. Keep it small (1-2) for components on
+#                  the free GitHub-hosted runners, whose 4 vCPU / 16 GB budget
+#                  nvcc blows through easily; components pointed at the
+#                  self-hosted machine can go far higher (verl's own
+#                  Dockerfiles use 128/256 on comparable hardware).
 # runs_on:         GitHub Actions runner label, or a list of required labels.
 #                  A plain field here (rather than a workflow constant) so
 #                  self-hosted/larger runners are a one-line edit away.
@@ -103,8 +103,11 @@ components:
     wheel_packages: [apex]
     torch_cuda_arch_list: "7.5;8.0;8.6;9.0;10.0;11.0;12.0"
     requires_cudnn: false
-    max_jobs: 2
-    runs_on: ubuntu-24.04
+    # apex spawns one plain nvcc per translation unit (no nested threading),
+    # so max_jobs is the whole concurrency story here; 32 is a level this
+    # self-hosted machine has already been driven at without OOM-killing nvcc.
+    max_jobs: 32
+    runs_on: [self-hosted, Linux, X64]
     extra_env: {}
 
   transformer-engine:
@@ -114,8 +117,11 @@ components:
     wheel_packages: [transformer-engine]
     torch_cuda_arch_list: "8.0;9.0;10.0"
     requires_cudnn: true
-    max_jobs: 1
-    runs_on: ubuntu-24.04
+    # Effective nvcc concurrency is max_jobs x NVTE_BUILD_THREADS_PER_JOB, so
+    # 16 here is really 64 compile threads - keep that product in mind before
+    # raising it further.
+    max_jobs: 16
+    runs_on: [self-hosted, Linux, X64]
     extra_env:
       NVTE_BUILD_THREADS_PER_JOB: "4"
 
@@ -129,42 +135,6 @@ components:
     max_jobs: 2
     runs_on: ubuntu-24.04
     extra_env: {}
-
-  sglang:
-    # Build working dir is the sgl-kernel subdir of the sglang submodule (that's
-    # the CUDA extension we compile); the sglang.sh builder additionally vendors
-    # the main `sglang` wheel from PyPI into the same dist/ (see below).
-    path: sglang/sgl-kernel
-    ref: v0.5.12 # matches `FROM lmsysorg/sglang:v0.5.12` in verl's sglang Dockerfile
-    builder: sglang
-    # Two wheels ship in the single `sglang-v0.5.12` release:
-    #   - sglang:        official manylinux wheel rehosted from PyPI (its only
-    #                    compiled part is a CUDA-agnostic Rust frontend, so there
-    #                    is nothing CUDA-specific to rebuild - see sglang.sh).
-    #   - sglang-kernel: the CUDA extension, compiled here for this CUDA/torch
-    #                    combo (pins to sgl-kernel 0.4.2.post2 at sglang v0.5.12).
-    wheel_packages: [sglang, sglang-kernel]
-    torch_cuda_arch_list: null # sgl-kernel hardcodes its own gencode flags
-    requires_cudnn: false
-    max_jobs: 32
-    build_timeout: 10h
-    job_timeout_minutes: 660 # 11h job cap: 10h build + setup/cache-save headroom
-    runs_on: [self-hosted, Linux, X64]
-    extra_env: {}
-
-  vllm:
-    path: vllm
-    ref: v0.24.0 # ahead of verl's vllm Dockerfile (VLLM_VERSION=0.23.0 as of verl main); arch list & requirements/build/cuda.txt unchanged from v0.23.0
-    builder: vllm
-    wheel_packages: [vllm]
-    torch_cuda_arch_list: "7.5;8.0;8.6;8.9;9.0;10.0;12.0"
-    requires_cudnn: false
-    max_jobs: 32
-    build_timeout: 10h
-    job_timeout_minutes: 660 # 11h job cap: 10h build + setup/cache-save headroom
-    runs_on: [self-hosted, Linux, X64]
-    extra_env:
-      NVCC_THREADS: "2"
 
   megatron-bridge:
     # NVIDIA-NeMo/Megatron-Bridge is a pure-Python training/conversion library

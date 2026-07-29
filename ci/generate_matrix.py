@@ -18,10 +18,10 @@ inputs of .github/workflows/_build.yml, so a workflow can do:
         include: ${{ fromJSON(needs.compute-matrix.outputs.matrix) }}
 
 Usage:
-    python ci/generate_matrix.py --component vllm
+    python ci/generate_matrix.py --component apex
     python ci/generate_matrix.py --component all
     python ci/generate_matrix.py --list-components
-    python ci/generate_matrix.py --component vllm --github-output
+    python ci/generate_matrix.py --component apex --github-output
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def sanitize_ref(ref: str) -> str:
 
 
 def release_tag(component: str, ref: str) -> str:
-    """Persistent per-component release tag, e.g. "vllm-v0.23.0".
+    """Persistent per-component release tag, e.g. "apex-master".
 
     Each component gets its own GitHub Release, keyed by its pinned ref
     rather than by a shared "latest"/repo-level tag: rebuilding the same ref

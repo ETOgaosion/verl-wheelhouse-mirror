@@ -44,17 +44,20 @@ Checklist:
       in that file. `wheel_packages` must list every distribution the build
       uploads; push builds use it to detect a complete matching release.
 - [ ] Create `ci/build_scripts/<builder>.sh`. Copy the shape of an existing
-      script (`ci/build_scripts/vllm.sh` is a good default): shebang,
+      script (`ci/build_scripts/apex.sh` is a good default): shebang,
       `set -euo pipefail`, source `common.sh`, call `export_extra_env`,
       install prerequisite pip packages, run the project's own documented
       wheel-build command (mirror its own CI/Dockerfile exactly), leave the
       wheel(s) in `dist/` relative to CWD. Then `chmod +x` it.
-- [ ] Copy an existing `.github/workflows/build-<component>.yml` (e.g.
-      `build-vllm.yml`) to `build-<new-component>.yml`; update its `name:`,
-      `paths:` filter entries, the `--component <name>` argument, and the
-      `component:` input passed to `_ensure_release.yml` in the
-      `ensure-release` job. Leave the reusable workflow calls' structure and
-      the `publish-index` job untouched - they're otherwise component-agnostic.
+- [ ] Copy an existing `.github/workflows/build-<component>.yml` to
+      `build-<new-component>.yml`; update its `name:`, `paths:` filter
+      entries, the `--component <name>` argument, and the `component:` input
+      passed to `_ensure_release.yml` in the `ensure-release` job. Leave the
+      reusable workflow calls' structure and the `publish-index` job
+      untouched - they're otherwise component-agnostic. Start from
+      `build-flashinfer.yml` for a GitHub-hosted component, or
+      `build-apex.yml` for a self-hosted one (it also forwards the
+      `BYTED_PROXY` secret).
 - [ ] Update `README.md`'s component table and repo-layout listing.
 - [ ] Validate:
       `pip install pyyaml && python3 ci/generate_matrix.py --component <name>`
@@ -67,12 +70,13 @@ Checklist:
 `torch_cuda_arch_list` in `versions.yaml` is canonical dotted+semicolon form
 (e.g. `8.0;9.0;12.0`); each build script converts it as needed:
 
-- apex, vllm: used as-is.
+- apex: used as-is.
 - flash-attention, TransformerEngine: undotted via `common.sh`'s
   `arch_list_strip_dots` (e.g. `80;90;120`).
 - flashinfer: given verbatim with PTX-family suffixes (e.g.
   `8.0 9.0a 12.0f`) since those can't be derived mechanically.
-- sglang (sgl-kernel): set to `null` - it hardcodes its own gencode flags.
+- Megatron-Bridge: set to `null` - the same goes for any component that
+  builds no CUDA code or hardcodes its own gencode flags.
 
 ## Release naming
 
