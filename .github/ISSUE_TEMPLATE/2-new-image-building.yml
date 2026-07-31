@@ -1,0 +1,107 @@
+name: New image building
+description: Track the work of actually building and publishing a new image / build combination
+title: "[image build] "
+labels: ["image", "build"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this to **track work you (or a maintainer) will do**: adding a build
+        combination, wiring up a component, and getting the artifacts published.
+        If you just want to *ask* for an image, use *New image request* instead.
+
+        The mechanics are in
+        [docs/maintaining-components.md](../../blob/main/docs/maintaining-components.md);
+        the checklist below mirrors it.
+
+  - type: input
+    id: target
+    attributes:
+      label: What is being built
+      description: Image tag and/or the `build_matrix` entry this covers.
+      placeholder: "verl-wheelhouse cu12.8.1 py3.12 torch2.9.0 (new build_matrix entry)"
+    validations:
+      required: true
+
+  - type: input
+    id: request
+    attributes:
+      label: Requested in
+      description: Link to the *New image request* issue this implements, if any.
+      placeholder: "#123"
+
+  - type: textarea
+    id: matrix
+    attributes:
+      label: Dependency matrix
+      description: The `build_matrix` entry (and any component `ref` changes) this build needs.
+      render: yaml
+      value: |
+        build_matrix:
+          - cuda: "13.0.2"
+            python: "3.12"
+            torch: "2.11.0"
+            torch_vision: "0.26.0"
+            torch_audio: "2.11.0"
+            cxx11_abi: "TRUE"
+
+        # component refs to change, if any:
+        # transformer-engine: v2.16.1 -> ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: components
+    attributes:
+      label: Components in scope
+      multiple: true
+      options:
+        - apex
+        - transformer-engine
+        - flash-attention
+        - flashinfer
+        - megatron-bridge
+        - A brand-new component (needs a submodule + build script)
+        - All of them (full sweep)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runner
+    attributes:
+      label: Runner
+      description: Heavy CUDA builds (apex, TransformerEngine) run on the self-hosted machine and need the `BYTED_PROXY` secret for uploads.
+      options:
+        - ubuntu-24.04 (GitHub-hosted)
+        - self-hosted, Linux, X64
+        - Mixed - per component, as configured in versions.yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: plan
+    attributes:
+      label: Build plan / notes
+      description: New build flags, cuDNN or system package needs, arch-list changes, expected build time, known upstream breakages.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: "`versions.yaml` updated (`build_matrix` entry and/or component `ref`, `torch_cuda_arch_list`, `max_jobs`, `runs_on`, `extra_env`)"
+        - label: "`ci/build_scripts/<builder>.sh` added or updated (leaves wheels in `dist/`)"
+        - label: "`.github/workflows/build-<component>.yml` added or updated (`paths:`, `--component`, `component:` input)"
+        - label: "Matrix validated locally: `python3 ci/generate_matrix.py --component <name> | python3 -m json.tool`"
+        - label: "Build script syntax-checked: `bash -n ci/build_scripts/<builder>.sh`"
+        - label: "`README.md` component table / repo layout updated"
+        - label: "Green `workflow_dispatch` run (link below)"
+        - label: "Release created/refreshed with the expected tag and title (`<component>-<ref>`)"
+        - label: "Every distribution in `wheel_packages` uploaded to that release"
+        - label: "`publish-index.yml` re-run and the wheel is `pip install`-able from the index"
+
+  - type: input
+    id: run_link
+    attributes:
+      label: Workflow run
+      placeholder: "https://github.com/verl-project/verl-wheelhouse/actions/runs/..."

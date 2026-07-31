@@ -1,0 +1,107 @@
+name: Bug report / fix
+description: A build fails, a published wheel is broken, or a release / index is wrong
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is broken?
+      options:
+        - A build fails in CI
+        - A published wheel is broken at install or import time
+        - A release is missing wheels, or has the wrong tag/title
+        - The PEP 503 index is stale, wrong, or unreachable
+        - Tooling (generate_matrix.py, release_meta.py, build_index.py)
+        - Docs are wrong or misleading
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      multiple: true
+      options:
+        - apex
+        - transformer-engine
+        - flash-attention
+        - flashinfer
+        - megatron-bridge
+        - Not component-specific
+    validations:
+      required: true
+
+  - type: input
+    id: combo
+    attributes:
+      label: Build combination
+      description: CUDA / Python / Torch, plus the component `ref` if you know it.
+      placeholder: "cu13.0.2 py3.12 torch2.11.0, transformer-engine v2.16.1"
+    validations:
+      required: true
+
+  - type: input
+    id: run_link
+    attributes:
+      label: Failing workflow run or release
+      placeholder: "https://github.com/verl-project/verl-wheelhouse/actions/runs/..."
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: >-
+        The exact command, or the workflow and how it was triggered (push /
+        workflow_dispatch / schedule / tag). For example:
+        `pip install --extra-index-url https://verl-project.github.io/verl-wheelhouse/simple/ transformer-engine`
+        followed by `python -c "import transformer_engine.pytorch"`.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: The relevant part of the log - the first error, not just the final summary. Attach the full log if it's large.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Only for runtime bugs (a wheel that installs or imports badly). Skip for CI build failures.
+      placeholder: |
+        GPU: H100 80GB
+        Driver / nvidia-smi CUDA: 580.xx / 13.0
+        OS + container image: ubuntu 24.04, nvidia/cuda:13.0.2-devel
+        python -V / pip -V:
+        pip list | grep -Ei "torch|apex|transformer-engine|flash|flashinfer|megatron"
+
+  - type: dropdown
+    id: runner
+    attributes:
+      label: Runner (for CI failures)
+      options:
+        - ubuntu-24.04 (GitHub-hosted)
+        - self-hosted, Linux, X64
+        - Not applicable
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I searched existing issues, and checked whether a newer release already fixes this
+          required: true
+        - label: I'm willing to open the fix PR
