@@ -112,6 +112,20 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runs-on) }}
     timeout-minutes: ${{ inputs.job-timeout-minutes }}
     steps:
+      # Repository secrets do not follow a repo when it is transferred or
+      # re-created under a new owner, and an unset BYTED_PROXY is otherwise
+      # invisible: the proxy env below just resolves to "", the build succeeds,
+      # and the first GitHub-bound transfer then hangs until the job timeout.
+      - name: Check egress proxy configuration
+        if: runner.environment == 'self-hosted'
+        env:
+          BYTED_PROXY: ${{ secrets.BYTED_PROXY }}
+        run: |
+          set +x  # never trace-expand the proxy URL, even though Actions masks it
+          if [ -z "${BYTED_PROXY:-}" ]; then
+            echo "::warning::BYTED_PROXY is unset, so GitHub-bound transfers from this self-hosted runner (wheel artifact, release assets, build cache) will use a direct connection. That egress is slow and prone to hanging; the steps below will time out rather than stall. Set BYTED_PROXY as a repository secret to an HTTP(S) egress proxy URL."
+          fi
+
       - name: Checkout verl-wheelhouse
         uses: actions/checkout@v5
         with:
@@ -249,6 +263,7 @@ jobs:
 
       - name: Restore resumable build cache
         uses: actions/cache/restore@v4
+        timeout-minutes: 30
         env:
           # Self-hosted runners (apex/transformer-engine) reach GitHub via
           # BYTED_PROXY; empty = direct connection on GitHub-hosted runners.
@@ -314,6 +329,7 @@ jobs:
       - name: Upload resumable build cache (on interrupt)
         if: always() && contains(fromJSON('["124", "137", "143"]'), steps.build_wheel.outputs.exit_code)
         uses: actions/cache/save@v4
+        timeout-minutes: 60
         env:
           # Self-hosted runners (apex/transformer-engine) reach GitHub via
           # BYTED_PROXY; empty = direct connection on GitHub-hosted runners.
@@ -341,6 +357,7 @@ jobs:
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
+        timeout-minutes: 30
         env:
           # Self-hosted runners (apex/transformer-engine) reach GitHub (and its
           # Azure blob artifact backend) via BYTED_PROXY; empty = direct
@@ -354,6 +371,7 @@ jobs:
 
       - name: Ensure release ${{ inputs.release-version }}
         if: inputs.upload-to-release
+        timeout-minutes: 15
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Self-hosted runners (apex/transformer-engine) reach GitHub via
@@ -381,6 +399,7 @@ jobs:
 
       - name: Upload wheel(s) to release ${{ inputs.release-version }}
         if: inputs.upload-to-release
+        timeout-minutes: 30
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Self-hosted runners (apex/transformer-engine) reach GitHub via

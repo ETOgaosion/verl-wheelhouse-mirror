@@ -159,19 +159,24 @@ historical record.
 
 ## Installing built wheels
 
-Once GitHub Pages is enabled for this repo (Settings → Pages → Source:
-GitHub Actions) and at least one wheel has been published (from a `main`
-push or a `release.yml` sweep, either way lands on that component's own
-release):
+The index is published to GitHub Pages at
+<https://verl-project.github.io/verl-wheelhouse/simple/>, and is refreshed
+whenever a wheel lands on a component's release (from a `main` push or a
+`release.yml` sweep):
 
 ```bash
-pip install --extra-index-url https://<owner>.github.io/<repo>/simple/ flash-attn
-pip install --extra-index-url https://<owner>.github.io/<repo>/simple/ transformer-engine
+pip install --extra-index-url https://verl-project.github.io/verl-wheelhouse/simple/ flash-attn
+pip install --extra-index-url https://verl-project.github.io/verl-wheelhouse/simple/ transformer-engine
 ```
 
 Or install a specific wheel directly from that component's
 [release page](../../releases) - look for the tag `<component>-<ref>`, e.g.
 `transformer-engine-v2.16.1`.
+
+On a fork, substitute your own `https://<owner>.github.io/<repo>/simple/`
+and enable Pages first (Settings → Pages → Source: GitHub Actions);
+everything in `ci/` and `.github/workflows/` derives the repo it is running
+in from `${{ github.repository }}`, so no other change is needed.
 
 ## Caveats
 
@@ -198,10 +203,14 @@ Or install a specific wheel directly from that component's
   egress proxy URL and those transfers are routed through it. It only takes
   effect on self-hosted runners (`runner.environment == 'self-hosted'`);
   GitHub-hosted builds always use a direct connection, so leaving the secret
-  unset is a no-op. Only the self-hosted components' workflows forward it to
-  the reusable `_build.yml`: `build-apex.yml`,
+  unset is a no-op for them. Only the self-hosted components' workflows
+  forward it to the reusable `_build.yml`: `build-apex.yml`,
   `build-transformer-engine.yml`, and the `build-all.yml`/`release.yml`
-  sweeps.
+  sweeps. Because secrets are per-repository and do not follow a fork or
+  transfer, a self-hosted build in a new repo warns up front when
+  `BYTED_PROXY` is missing, and every transfer that would use it carries a
+  `timeout-minutes` cap so a stalled upload fails within the hour instead of
+  sitting on the runner until the job times out.
 - **`apex` tracks `master`** (both verl Dockerfiles build it unpinned), so it
   effectively behaves like a rolling release under the fixed tag
   `apex-master`; every other component tracks a specific tag and gets a fresh
