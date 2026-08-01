@@ -2,9 +2,10 @@
 """Expand versions.yaml (in the project's base directory) into a GitHub
 Actions build matrix.
 
-versions.yaml is the single editable/extendable source of truth for CUDA /
-Python / Torch combinations and per-component build config - it is plain
-data (no Python), so it can be read and edited without touching any code.
+versions.yaml is the single editable/extendable source of truth for CPU
+arch / CUDA / Python / Torch combinations and per-component build config -
+it is plain data (no Python), so it can be read and edited without touching
+any code.
 This script is the primary place that turns it into something GitHub
 Actions can consume (ci/release_meta.py, which computes per-component
 release tag/title/notes, imports this module's load_versions/release_tag
@@ -20,6 +21,7 @@ inputs of .github/workflows/_build.yml, so a workflow can do:
 Usage:
     python ci/generate_matrix.py --component apex
     python ci/generate_matrix.py --component all
+    python ci/generate_matrix.py --component flash-attention --arch aarch64
     python ci/generate_matrix.py --list-components
     python ci/generate_matrix.py --component apex --github-output
 """
@@ -33,7 +35,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -45,10 +47,75 @@ VERSIONS_FILE = Path(__file__).resolve().parent.parent / "versions.yaml"
 # valid/clean git tag components on their own.
 _TAG_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Arch assumed for a build_matrix entry that doesn't spell one out, and the
+# one left implicit in release titles (see release_title).
+DEFAULT_ARCH = "x86_64"
+
+# Wheel platform-tag suffixes mapped to the build_matrix `arch` they satisfy,
+# e.g. "manylinux_2_28_aarch64" -> aarch64.
+_PLATFORM_TAG_ARCHES = {
+    "x86_64": "x86_64",
+    "amd64": "x86_64",
+    "aarch64": "aarch64",
+    "arm64": "aarch64",
+}
+
 
 def load_versions() -> Dict[str, Any]:
     with open(VERSIONS_FILE, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def combo_arch(combo: Dict[str, Any]) -> str:
+    return str(combo.get("arch", DEFAULT_ARCH))
+
+
+def matrix_arches(versions: Dict[str, Any]) -> List[str]:
+    """Every arch the build_matrix covers, in first-seen order."""
+    return list(dict.fromkeys(combo_arch(combo) for combo in versions["build_matrix"]))
+
+
+def component_arches(versions: Dict[str, Any], component: str) -> List[str]:
+    """The arches one component opts into, in build_matrix order.
+
+    A component without an `arches` field builds every arch in the matrix;
+    one with it builds only the listed subset (see versions.yaml for why a
+    component would opt out of an arch).
+    """
+    cfg = get_component(versions, component)
+    available = matrix_arches(versions)
+
+    unknown = sorted(set(cfg.get("arch_overrides") or {}) - set(available))
+    if unknown:
+        raise SystemExit(
+            f"Component {component!r} has arch_overrides for arch(es) not in build_matrix: "
+            f"{', '.join(unknown)}. Known arches: {', '.join(available)}"
+        )
+
+    configured = cfg.get("arches")
+    if configured is None:
+        return available
+
+    unknown = sorted({str(arch) for arch in configured} - set(available))
+    if unknown:
+        raise SystemExit(
+            f"Component {component!r} lists arch(es) not in build_matrix: {', '.join(unknown)}. "
+            f"Known arches: {', '.join(available)}"
+        )
+    return [arch for arch in available if arch in {str(a) for a in configured}]
+
+
+def component_combos(versions: Dict[str, Any], component: str) -> List[Dict[str, Any]]:
+    """The build_matrix rows one component is actually built for."""
+    arches = set(component_arches(versions, component))
+    return [combo for combo in versions["build_matrix"] if combo_arch(combo) in arches]
+
+
+def component_config(versions: Dict[str, Any], component: str, arch: str) -> Dict[str, Any]:
+    """One component's config with its `arch_overrides` for `arch` applied."""
+    cfg = dict(get_component(versions, component))
+    cfg.update((cfg.pop("arch_overrides", None) or {}).get(arch) or {})
+    return cfg
 
 
 def sanitize_ref(ref: str) -> str:
@@ -70,17 +137,46 @@ def release_tag(component: str, ref: str) -> str:
     return f"{component}-{sanitize_ref(ref)}"
 
 
-def release_title(ref: str, component: str, build_matrix: List[Dict[str, Any]]) -> str:
-    """Describe the dependency combinations covered by a component release."""
-    combos = "; ".join(
-        f"cu{combo['cuda']} py{combo['python']} torch{combo['torch']}" for combo in build_matrix
+def release_title(ref: str, component: str, combos: List[Dict[str, Any]]) -> str:
+    """Describe the dependency combinations covered by a component release.
+
+    One "cu.. py.. torch.." segment per combination the component is built
+    for, prefixed by the arch for everything except DEFAULT_ARCH - x86_64 is
+    the baseline every component builds, so leaving it implicit keeps the
+    titles of x86_64-only releases stable (and their builds skippable) as
+    other arches are added to the matrix.
+    """
+    segments = "; ".join(
+        f"{'' if combo_arch(combo) == DEFAULT_ARCH else combo_arch(combo) + ' '}"
+        f"cu{combo['cuda']} py{combo['python']} torch{combo['torch']}"
+        for combo in combos
     )
-    return f"{component} {ref} - {combos}"
+    return f"{component} {ref} - {segments}"
 
 
 def normalize_package_name(name: str) -> str:
     """Apply PEP 503 package-name normalization."""
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def wheel_arches(filename: str, arches: List[str]) -> Set[str]:
+    """Which of `arches` a wheel file's platform tag can be installed on.
+
+    A wheel filename ends in "-<python>-<abi>-<platform>.whl", where platform
+    may itself be a "."-joined set of compressed tags (e.g.
+    "manylinux_2_27_x86_64.manylinux_2_28_x86_64"). Pure-Python wheels are
+    tagged "any" and count for every arch.
+    """
+    platform_tag = filename[: -len(".whl")].rsplit("-", 1)[-1]
+    matched = set()
+    for tag in platform_tag.split("."):
+        if tag == "any":
+            return set(arches)
+        for suffix, arch in _PLATFORM_TAG_ARCHES.items():
+            if tag.endswith(suffix):
+                matched.add(arch)
+                break
+    return matched & set(arches)
 
 
 def release_covers_component(
@@ -89,7 +185,7 @@ def release_covers_component(
     """Check that a release has the exact dependency title and all expected wheels."""
     cfg = get_component(versions, component)
     ref = str(cfg["ref"])
-    expected_title = release_title(ref, component, versions["build_matrix"])
+    expected_title = release_title(ref, component, component_combos(versions, component))
     actual_title = release.get("name")
     if actual_title != expected_title:
         return False, f"title mismatch: expected {expected_title!r}, found {actual_title!r}"
@@ -98,17 +194,28 @@ def release_covers_component(
     if not isinstance(configured_packages, list) or not configured_packages:
         return False, "wheel_packages is not configured"
 
-    required_packages = {normalize_package_name(str(name)) for name in configured_packages}
-    released_packages = {
-        normalize_package_name(str(asset["name"]).split("-", 1)[0])
+    # Every expected wheel is tracked per arch, not just per package name:
+    # a component built for both x86_64 and aarch64 is only covered once both
+    # platform-tagged wheels are on the release, otherwise the first arch to
+    # upload would mark the other one's build as redundant forever.
+    arches = component_arches(versions, component)
+    required = {
+        (normalize_package_name(str(name)), arch)
+        for name in configured_packages
+        for arch in arches
+    }
+    released = {
+        (normalize_package_name(str(asset["name"]).split("-", 1)[0]), arch)
         for asset in release.get("assets", [])
         if isinstance(asset, dict)
         and isinstance(asset.get("name"), str)
         and asset["name"].endswith(".whl")
+        for arch in wheel_arches(asset["name"], arches)
     }
-    missing_packages = sorted(required_packages - released_packages)
-    if missing_packages:
-        return False, f"missing wheel package(s): {', '.join(missing_packages)}"
+    missing = sorted(required - released)
+    if missing:
+        formatted = ", ".join(f"{package} ({arch})" for package, arch in missing)
+        return False, f"missing wheel package(s): {formatted}"
 
     return True, "exact dependency title and all expected wheel packages are present"
 
@@ -180,11 +287,17 @@ def get_component(versions: Dict[str, Any], name: str) -> Dict[str, Any]:
 
 
 def build_matrix_entries(versions: Dict[str, Any], component: str) -> List[Dict[str, Any]]:
-    """Cartesian-product one component's config against the whole build_matrix."""
-    cfg = get_component(versions, component)
-    ref = str(cfg["ref"])
+    """Cartesian-product one component's config against the build_matrix.
+
+    Only the rows whose arch the component opts into, and with that arch's
+    `arch_overrides` merged in (so e.g. an aarch64 row can carry its own
+    runner and CUDA arch list).
+    """
+    ref = str(get_component(versions, component)["ref"])
     entries = []
-    for combo in versions["build_matrix"]:
+    for combo in component_combos(versions, component):
+        arch = combo_arch(combo)
+        cfg = component_config(versions, component, arch)
         entries.append(
             {
                 "component": component,
@@ -192,6 +305,7 @@ def build_matrix_entries(versions: Dict[str, Any], component: str) -> List[Dict[
                 "ref": ref,
                 "release_tag": release_tag(component, ref),
                 "builder": cfg["builder"],
+                "arch": arch,
                 # Reusable-workflow inputs are strings, while GitHub Actions
                 # accepts either a label or a label array for `runs-on`.
                 # Preserve both config forms by sending a JSON-encoded value;
@@ -233,6 +347,15 @@ def main() -> None:
         help="Component name from versions.yaml, or 'all' (default) for every component.",
     )
     parser.add_argument(
+        "--arch",
+        default="all",
+        help=(
+            "Restrict the matrix to one build_matrix arch (e.g. aarch64), or 'all' "
+            "(default) for every arch each component opts into. Useful to test one "
+            "arch without also spending a runner on the others."
+        ),
+    )
+    parser.add_argument(
         "--list-components",
         action="store_true",
         help="Print known component names (one per line) and exit.",
@@ -272,6 +395,17 @@ def main() -> None:
         components = components_needing_build(versions, components, args.repo)
 
     matrix = build_full_matrix(versions, components)
+
+    if args.arch != "all":
+        available = matrix_arches(versions)
+        if args.arch not in available:
+            parser.error(f"Unknown arch {args.arch!r}. Known arches: {', '.join(available)}, all")
+        # An empty result is expected and fine here (e.g. --component apex
+        # --arch aarch64, for a component that opts out of that arch): the
+        # has_builds output below lets the calling workflow skip its build job
+        # rather than fail on an empty matrix.
+        matrix = [entry for entry in matrix if entry["arch"] == args.arch]
+
     payload = json.dumps(matrix)
     print(payload)
 

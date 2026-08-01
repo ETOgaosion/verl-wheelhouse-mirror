@@ -40,9 +40,11 @@ Checklist:
 - [ ] `git submodule add <url> <path>`
 - [ ] Add a `components:` entry to `versions.yaml` (`path`, `ref`,
       `builder`, `wheel_packages`, `torch_cuda_arch_list`, `requires_cudnn`,
-      `max_jobs`, `runs_on`, `extra_env`) - follow the schema comments already
-      in that file. `wheel_packages` must list every distribution the build
-      uploads; push builds use it to detect a complete matching release.
+      `max_jobs`, `runs_on`, `arches`, `extra_env`) - follow the schema
+      comments already in that file. `wheel_packages` must list every
+      distribution the build uploads; push builds use it to detect a complete
+      matching release. Start with `arches: [x86_64]` and add arm64 later
+      (see below).
 - [ ] Create `ci/build_scripts/<builder>.sh`. Copy the shape of an existing
       script (`ci/build_scripts/apex.sh` is a good default): shebang,
       `set -euo pipefail`, source `common.sh`, call `export_extra_env`,
@@ -65,6 +67,32 @@ Checklist:
 - [ ] No changes needed in `build-all.yml` or `release.yml` - both already
       use `--component all` and pick up new components automatically.
 
+## CPU arches (x86_64 / aarch64)
+
+`build_matrix` entries carry an `arch` field (`uname -m` spelling). A
+component builds every arch in the matrix unless it narrows that with
+`arches: [...]`, and can replace any field per arch via `arch_overrides`:
+
+```yaml
+arch_overrides:
+  aarch64:
+    runs_on: ubuntu-24.04-arm # or [self-hosted, Linux, ARM64]
+    torch_cuda_arch_list: "9.0;10.0" # arm64 CUDA hosts are GH200/GB200-class only
+```
+
+To enable arm64 for a component: drop its `arches: [x86_64]`, add the
+`arch_overrides.aarch64` block above, and - if it emits any `py3-none-any`
+wheel - make the build script skip that wheel when `$TARGET_ARCH` is not
+`x86_64`, or both arches will upload the same asset name. `_build.yml`
+asserts the runner's `uname -m` matches the row's arch. No other change is
+needed; CUDA, cuDNN, NCCL and torch installation are already arch-aware.
+
+Each arch is a separate job. To build just one, dispatch
+`build-<component>.yml` with its `arch` input (or pass
+`--arch <arch>` to `ci/generate_matrix.py` locally); pushes always build
+every arch. When adding a new arch to `build_matrix`, extend the static
+`options:` list of every workflow's `arch` dispatch input to match.
+
 ## Arch-list conventions
 
 `torch_cuda_arch_list` in `versions.yaml` is canonical dotted+semicolon form
@@ -82,8 +110,9 @@ Checklist:
 
 Each component publishes to its **own** persistent GitHub Release (no
 single combined release for the whole repo): tag `<component>-<ref>`,
-title `<component> <ref> - cu<cuda> py<python> torch<torch>[; ...]` (one
-segment per `versions.yaml` `build_matrix` entry). This is computed by
+title `<component> <ref> - [<arch> ]cu<cuda> py<python> torch<torch>[; ...]`
+(one segment per `versions.yaml` `build_matrix` entry the component is built
+for, with the `x86_64` arch left implicit). This is computed by
 `ci/release_meta.py` and created/refreshed by the reusable
 `.github/workflows/_ensure_release.yml` workflow - don't hand-roll
 `gh release create`/`edit` calls elsewhere. Bumping a component's `ref`

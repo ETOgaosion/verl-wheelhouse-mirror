@@ -68,21 +68,23 @@ Everything version-related lives in one editable, plain-data YAML file at
 the project's base directory - no Python, no workflow YAML - needs to
 change for routine version bumps:
 
-- **`build_matrix`**: the CUDA / Python / Torch combinations to build. Seeded
-  with CUDA `13.0.2`, Python `3.12`, Torch `2.11.0` (matching both verl
-  Dockerfiles' `ARG` defaults). Add another entry to build more combinations
-  - every component is built once per entry here.
+- **`build_matrix`**: the CPU arch / CUDA / Python / Torch combinations to
+  build. Seeded with CUDA `13.0.2`, Python `3.12`, Torch `2.11.0` (matching
+  both verl Dockerfiles' `ARG` defaults), on `x86_64` and `aarch64`. Add
+  another entry to build more combinations - every component is built once
+  per entry here, minus the ones its `arches` filter excludes.
 - **`components`**: per-submodule config - the git `ref` to build (branch,
   tag, or commit; overrides whatever commit the submodule pointer in this
   repo is on), which `ci/build_scripts/<builder>.sh` to run, the CUDA arch
-  list, whether cuDNN is required, `max_jobs`, the runner label, and any
-  extra environment variables.
+  list, whether cuDNN is required, `max_jobs`, the runner label, which CPU
+  arches to build for (`arches`) with optional per-arch field overrides
+  (`arch_overrides`), and any extra environment variables.
 - **`verl_reference_versions`**: versions verl's Dockerfiles pin for things
   this repo does *not* build (`transformers`, `trl`, `nsight_systems`,
   `megatron`, `verl` itself) - tracked here purely for compatibility
   bookkeeping.
 
-To add a new CUDA/Python/Torch combination, append an entry to
+To add a new arch/CUDA/Python/Torch combination, append an entry to
 `build_matrix`. To bump a component's version, edit its `ref`. To add a
 brand-new component, add an entry to `components` and a matching
 `ci/build_scripts/<builder>.sh`.
@@ -110,9 +112,11 @@ combined release for "the repo" as a whole. `ci/release_meta.py` computes,
 for a component and its currently-pinned `ref` in `versions.yaml`:
 
 - **tag**: `<component>-<ref>`, e.g. `transformer-engine-v2.16.1`
-- **title**: `<component> <ref> - cu<cuda> py<python> torch<torch>[; ...]`
-  (one `cu.. py.. torch..` segment per `build_matrix` entry), e.g.
-  `transformer-engine v2.16.1 - cu13.0.2 py3.12 torch2.11.0`
+- **title**: `<component> <ref> - [<arch> ]cu<cuda> py<python> torch<torch>[; ...]`
+  (one segment per `build_matrix` entry the component is built for, with the
+  `x86_64` arch left implicit), e.g. `transformer-engine v2.16.1 - cu13.0.2
+  py3.12 torch2.11.0` or `flash-attention v2.8.3 - cu13.0.2 py3.12
+  torch2.11.0; aarch64 cu13.0.2 py3.12 torch2.11.0`
 
 The reusable `.github/workflows/_ensure_release.yml` workflow creates that
 release if it doesn't exist yet, or refreshes its title (in case
@@ -129,15 +133,25 @@ historical record.
   automatically on pushes to `main` (including PR merges) that touch
   `versions.yaml`, `ci/generate_matrix.py`, `ci/build_scripts/common.sh`, or
   that component's build script.
+- Every arch/CUDA/Python/Torch combination is an independent job on its own
+  runner, with its own build cache and wheel artifact, and `fail-fast: false`
+  keeps one failure from cancelling the others. A manual run additionally
+  takes an **arch** choice (`all` / `x86_64` / `aarch64`), so you can test one
+  architecture without spending hours of runner time on the others; a
+  component that doesn't opt into the chosen arch simply has nothing to build
+  and its build job is skipped. Pushes always build every arch.
 - On a push, the workflow first checks the component's target release. If its
-  title exactly matches the configured CUDA/Python/Torch matrix and it contains
-  every distribution listed in that component's `wheel_packages`, the build is
+  title exactly matches the configured arch/CUDA/Python/Torch matrix and it
+  contains every distribution listed in that component's `wheel_packages` for
+  every arch it builds (matched on each wheel's own platform tag, so an
+  x86_64 wheel never stands in for a missing aarch64 one), the build is
   skipped. Otherwise, a successful build ensures/updates the release, uploads
   the wheel(s), and re-runs `publish-index.yml`. Manual `workflow_dispatch`
   runs always build but skip publishing, so they can force a fresh test build.
 - `build-all.yml` builds every component and also runs on a weekly schedule
-  as a sanity sweep. It does **not** publish - it's for validating the whole
-  matrix still builds cleanly.
+  as a sanity sweep (the schedule always covers every arch; a manual run
+  takes the same arch choice as the per-component workflows). It does **not**
+  publish - it's for validating the whole matrix still builds cleanly.
 - Pushing a tag matching `v*` runs `release.yml`, which is purely a
   trigger - the tag itself is not a release. It runs the full component x
   matrix sweep and, for every component, ensures/updates that same
@@ -180,6 +194,24 @@ in from `${{ github.repository }}`, so no other change is needed.
 
 ## Caveats
 
+- **arm64 wheels are opt-in per component, and only `flash-attention`
+  currently opts in.** The `build_matrix` covers `x86_64` and `aarch64`, but
+  every other component sets `arches: [x86_64]`. `apex` and
+  `TransformerEngine` are excluded because they depend on the x86_64
+  self-hosted machine and GitHub's free 4 vCPU arm64 runner cannot stand in
+  for `max_jobs: 32`/`16`; `Megatron-Bridge` because its wheel is
+  arch-independent `py3-none-any` and only needs building once; `flashinfer`
+  because two of its three wheels are likewise `py3-none-any` and its build
+  script would first need to skip those on arm. Nothing else needs to change
+  to add an arch to a component - drop it into `arches` and give it an
+  `arch_overrides` entry with an arm64 `runs_on` (and usually a narrower
+  `torch_cuda_arch_list`, since every CUDA-capable arm64 host is a
+  GH200/GB200-class part). Everything the toolchain needs already works
+  there: `Jimver/cuda-toolkit` rewrites its apt repo path to NVIDIA's `sbsa`
+  one, `common.sh`'s `install_cudnn` maps `aarch64` → `sbsa`, and
+  download.pytorch.org publishes `manylinux_2_28_aarch64` CUDA wheels. Both
+  arches' wheels live on the same per-component release and the PEP 503
+  index lists them side by side - pip picks by platform tag.
 - **Two components build on a self-hosted machine.** `apex` and
   `TransformerEngine` are the heavy CUDA builds here, so their `runs_on`
   points at a self-hosted runner (`[self-hosted, Linux, X64]`) and their

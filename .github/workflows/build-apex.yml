@@ -1,7 +1,15 @@
 name: Build apex
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "CPU arch to build (all = every arch this component opts into)"
+        type: choice
+        default: all
+        # Choices must be static, so this mirrors versions.yaml's build_matrix
+        # arches by hand; generate_matrix.py rejects any that aren't in it.
+        options: [all, x86_64, aarch64]
   push:
     branches: [main]
     paths:
@@ -34,13 +42,16 @@ jobs:
       - id: matrix
         env:
           EVENT_NAME: ${{ github.event_name }}
+          # Only workflow_dispatch carries an arch choice; a push always
+          # builds every arch the component opts into.
+          ARCH: ${{ inputs.arch || 'all' }}
           GH_TOKEN: ${{ github.token }}
         run: |
           args=()
           if [[ "$EVENT_NAME" == "push" ]]; then
             args+=(--skip-existing-releases --repo "$GITHUB_REPOSITORY")
           fi
-          python3 ci/generate_matrix.py --component apex --github-output "${args[@]}"
+          python3 ci/generate_matrix.py --component apex --arch "$ARCH" --github-output "${args[@]}"
 
   build:
     needs: compute-matrix
@@ -56,6 +67,7 @@ jobs:
       ref: ${{ matrix.ref }}
       builder: ${{ matrix.builder }}
       runs-on: ${{ matrix.runs_on }}
+      arch: ${{ matrix.arch }}
       cuda-version: ${{ matrix.cuda }}
       python-version: ${{ matrix.python }}
       torch-version: ${{ matrix.torch }}

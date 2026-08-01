@@ -10,7 +10,7 @@ other logic needs to change for routine work.
 
 | File | Role |
 |---|---|
-| `versions.yaml` | The version map: CUDA/Python/Torch build matrix + per-component config |
+| `versions.yaml` | The version map: arch/CUDA/Python/Torch build matrix + per-component config |
 | `ci/generate_matrix.py` | Expands `versions.yaml` into the GitHub Actions matrix (no edits needed for routine work) |
 | `ci/release_meta.py` | Computes each component's release tag/title/notes (no edits needed for routine work) |
 | `ci/build_scripts/common.sh` | Shared bash helpers (no edits needed unless adding new shared logic) |
@@ -25,7 +25,8 @@ other logic needs to change for routine work.
 1. Open `versions.yaml` and find the component under `components:`.
 2. Update its `ref:` to the new git tag/branch/commit you want to pin.
 3. Check the upstream project's release notes for anything else that changed:
-   - New/removed supported GPU architectures → update `torch_cuda_arch_list`.
+   - New/removed supported GPU architectures → update `torch_cuda_arch_list`
+     (and the copy under `arch_overrides`, if the component has one).
    - New build-time environment variables or flags → update
      `ci/build_scripts/<builder>.sh` and/or `extra_env` in `versions.yaml`.
    - A cuDNN version bump or new system package requirement → update
@@ -83,8 +84,12 @@ Worked checklist, using a hypothetical `xformers` component as the example:
      requires_cudnn: false
      max_jobs: 2
      runs_on: ubuntu-24.04
+     arches: [x86_64]
      extra_env: {}
    ```
+
+   Start with `arches: [x86_64]` and add arm64 as a follow-up once the
+   x86_64 build is green - see the next section.
 
 3. **Write `ci/build_scripts/xformers.sh`.** Use an existing script as a
    template (`ci/build_scripts/apex.sh` is a good default shape); every
@@ -150,6 +155,70 @@ Worked checklist, using a hypothetical `xformers` component as the example:
 7. `build-all.yml` and `release.yml` both use `--component all`, so the new
    component is automatically included in the weekly sanity sweep and in
    every future release - no changes needed there.
+
+## Building a component for another CPU arch (arm64)
+
+`build_matrix` carries an `arch` field (`x86_64` / `aarch64`, spelled the way
+`uname -m` reports it), and each component chooses which of those arches it
+is built for:
+
+```yaml
+components:
+  flash-attention:
+    runs_on: ubuntu-24.04
+    torch_cuda_arch_list: "8.0;9.0;10.0;12.0"
+    # no `arches` field -> every arch in build_matrix
+    arch_overrides:
+      aarch64:
+        runs_on: ubuntu-24.04-arm
+        torch_cuda_arch_list: "9.0;10.0"
+
+  apex:
+    arches: [x86_64] # opt out of arm64 entirely
+```
+
+To turn arm64 on for a component:
+
+1. Remove its `arches: [x86_64]` line (or add `aarch64` to the list).
+2. Add an `arch_overrides.aarch64` block with, at minimum, an arm64
+   `runs_on` - `ubuntu-24.04-arm` for GitHub's free 4 vCPU arm64 runner, or
+   your own `[self-hosted, Linux, ARM64]` labels. `_build.yml` asserts
+   `uname -m` matches the row's arch, so a runner/arch mismatch fails in
+   seconds instead of after a multi-hour build.
+3. Narrow `torch_cuda_arch_list` for that arch. Every CUDA-capable arm64
+   host is a server/superchip part - GH200 (`9.0`) and GB200 (`10.0`) -
+   so carrying the x86_64 list's `8.0`/`12.0` only burns runner hours.
+4. If the component produces any `py3-none-any` wheel, make the build script
+   skip it on arm (check `$TARGET_ARCH`, which `_build.yml` exports).
+   Otherwise both arches upload the same asset name onto the same release.
+5. Regenerate the matrix and confirm both rows appear with the right runners:
+
+   ```bash
+   python3 ci/generate_matrix.py --component <name> | python3 -m json.tool
+   python3 ci/release_meta.py --component <name>
+   ```
+
+6. Smoke-test the new arch on its own before letting a push build both:
+   trigger `build-<component>.yml` from the Actions tab and set its **arch**
+   input to that arch. `workflow_dispatch` runs build without publishing, and
+   the arch filter keeps the other arches off the runners entirely. The same
+   filter is available locally:
+
+   ```bash
+   python3 ci/generate_matrix.py --component <name> --arch aarch64
+   ```
+
+Adding an arch to a component changes its release title, which is what makes
+the next push rebuild it (the skip check requires an exact title match *and*
+a wheel per package per arch, matched on each wheel's platform tag). Titles
+leave `x86_64` implicit, so x86_64-only components keep their existing titles
+and are not disturbed when a new arch enters `build_matrix`.
+
+The rest of the toolchain is already arch-agnostic: `Jimver/cuda-toolkit`
+switches its apt repo to NVIDIA's `sbsa` path on arm64, `common.sh`'s
+`install_cudnn` maps `aarch64` → `sbsa`, `install_nccl` resolves its version
+from whatever repo is configured, and `pip install torch --index-url
+.../cu130` picks the `manylinux_2_28_aarch64` wheel by itself.
 
 ## Arch-list conventions
 

@@ -42,6 +42,7 @@ jobs:
       ref: ${{ matrix.ref }}
       builder: ${{ matrix.builder }}
       runs-on: ${{ matrix.runs_on }}
+      arch: ${{ matrix.arch }}
       cuda-version: ${{ matrix.cuda }}
       python-version: ${{ matrix.python }}
       torch-version: ${{ matrix.torch }}

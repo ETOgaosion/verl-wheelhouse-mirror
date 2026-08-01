@@ -5,7 +5,15 @@ name: Build all components
 # release (see release.yml for the tag-triggered release build).
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "CPU arch to build (all = every arch each component opts into)"
+        type: choice
+        default: all
+        # Choices must be static, so this mirrors versions.yaml's build_matrix
+        # arches by hand; generate_matrix.py rejects any that aren't in it.
+        options: [all, x86_64, aarch64]
   schedule:
     # Weekly sanity build, Monday 03:00 UTC.
     - cron: "0 3 * * 1"
@@ -19,6 +27,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      has_builds: ${{ steps.matrix.outputs.has_builds }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -26,10 +35,17 @@ jobs:
           python-version: "3.12"
       - run: pip install pyyaml
       - id: matrix
-        run: python3 ci/generate_matrix.py --component all --github-output
+        env:
+          # Only workflow_dispatch carries an arch choice; the scheduled sweep
+          # always covers every arch.
+          ARCH: ${{ inputs.arch || 'all' }}
+        run: python3 ci/generate_matrix.py --component all --arch "$ARCH" --github-output
 
   build:
     needs: compute-matrix
+    # An arch filter can leave nothing to build (e.g. no component opts into
+    # the chosen arch); an empty matrix is a workflow error, so skip instead.
+    if: needs.compute-matrix.outputs.has_builds == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +57,7 @@ jobs:
       ref: ${{ matrix.ref }}
       builder: ${{ matrix.builder }}
       runs-on: ${{ matrix.runs_on }}
+      arch: ${{ matrix.arch }}
       cuda-version: ${{ matrix.cuda }}
       python-version: ${{ matrix.python }}
       torch-version: ${{ matrix.torch }}

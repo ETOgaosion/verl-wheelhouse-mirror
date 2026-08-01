@@ -7,9 +7,10 @@ component's currently-pinned ref rather than by a shared "latest"/repo-level
 tag:
 
     tag:   "<component>-<ref>"                     e.g. "transformer-engine-v2.16.1"
-    title: "<component> <ref> - cu<cuda> py<python> torch<torch>[; ...]"
-           (one "cu.. py.. torch.." segment per versions.yaml build_matrix
-           entry) e.g. "transformer-engine v2.16.1 - cu13.0.2 py3.12 torch2.11.0"
+    title: "<component> <ref> - [<arch> ]cu<cuda> py<python> torch<torch>[; ...]"
+           (one segment per versions.yaml build_matrix entry the component is
+           built for, with the x86_64 arch left implicit) e.g.
+           "transformer-engine v2.16.1 - cu13.0.2 py3.12 torch2.11.0"
 
 Rebuilding the same ref re-uploads (--clobber) wheels onto the same
 release; bumping a component's ref in versions.yaml starts a brand new
@@ -31,7 +32,14 @@ import json
 import os
 from typing import Any, Dict, List
 
-from generate_matrix import component_names, get_component, load_versions, release_tag, release_title
+from generate_matrix import (
+    component_combos,
+    component_names,
+    get_component,
+    load_versions,
+    release_tag,
+    release_title,
+)
 
 
 def release_notes(component: str, ref: str) -> str:
@@ -48,7 +56,7 @@ def component_release_meta(versions: Dict[str, Any], component: str) -> Dict[str
         "component": component,
         "ref": ref,
         "tag": release_tag(component, ref),
-        "title": release_title(ref, component, versions["build_matrix"]),
+        "title": release_title(ref, component, component_combos(versions, component)),
         "notes": release_notes(component, ref),
     }
 

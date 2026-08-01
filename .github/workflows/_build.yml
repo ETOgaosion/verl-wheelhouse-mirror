@@ -2,10 +2,10 @@ name: "\u007eBuild wheel"
 
 # Reusable single-combination build workflow, structured after
 # flash-attention's own .github/workflows/_build.yml. Every field a build
-# needs (component identity, checkout ref, CUDA/Python/Torch versions, arch
-# list, job parallelism, extra env) is passed in as an input rather than
-# hard-coded, so the whole build matrix is driven purely by the project's
-# versions.yaml (in the repo's base directory).
+# needs (component identity, checkout ref, CPU arch, CUDA/Python/Torch
+# versions, GPU arch list, job parallelism, extra env) is passed in as an
+# input rather than hard-coded, so the whole build matrix is driven purely
+# by the project's versions.yaml (in the repo's base directory).
 
 on:
   workflow_call:
@@ -31,6 +31,17 @@ on:
         required: false
         type: string
         default: '"ubuntu-24.04"'
+      arch:
+        description: >-
+          CPU architecture this combination builds for, as `uname -m` spells
+          it (x86_64 / aarch64). Only identifies the build - the runner it
+          lands on comes from `runs-on` - so the job asserts the two agree
+          before compiling anything, and it namespaces the wheel artifact and
+          the resumable build cache so two arches never collide or resume
+          from each other's object files.
+        required: false
+        type: string
+        default: "x86_64"
       cuda-version:
         required: true
         type: string
@@ -108,7 +119,7 @@ defaults:
 
 jobs:
   build:
-    name: "${{ inputs.component }} (cuda${{ inputs.cuda-version }}-py${{ inputs.python-version }}-torch${{ inputs.torch-version }})"
+    name: "${{ inputs.component }} (${{ inputs.arch }}-cuda${{ inputs.cuda-version }}-py${{ inputs.python-version }}-torch${{ inputs.torch-version }})"
     runs-on: ${{ fromJSON(inputs.runs-on) }}
     timeout-minutes: ${{ inputs.job-timeout-minutes }}
     steps:
@@ -124,6 +135,19 @@ jobs:
           set +x  # never trace-expand the proxy URL, even though Actions masks it
           if [ -z "${BYTED_PROXY:-}" ]; then
             echo "::warning::BYTED_PROXY is unset, so GitHub-bound transfers from this self-hosted runner (wheel artifact, release assets, build cache) will use a direct connection. That egress is slow and prone to hanging; the steps below will time out rather than stall. Set BYTED_PROXY as a repository secret to an HTTP(S) egress proxy URL."
+          fi
+
+      # A mismatch here means versions.yaml pairs an arch with a runner that
+      # isn't that arch (e.g. an aarch64 row whose arch_overrides still point
+      # at ubuntu-24.04). Everything downstream would still "work" - it would
+      # just quietly publish a wheel whose platform tag contradicts the
+      # release's own title - so fail before spending hours compiling.
+      - name: Verify runner architecture is ${{ inputs.arch }}
+        run: |
+          actual="$(uname -m)"
+          if [ "$actual" != "${{ inputs.arch }}" ]; then
+            echo "::error::This build targets ${{ inputs.arch }} but the runner is $actual. Fix the component's runs_on/arch_overrides in versions.yaml." >&2
+            exit 1
           fi
 
       - name: Checkout verl-wheelhouse
@@ -273,7 +297,7 @@ jobs:
           path: ${{ inputs.path }}/build-cache.tar
           key: never-match-${{ github.run_id }}
           restore-keys: |
-            build-cache-${{ inputs.component }}-${{ inputs.cuda-version }}-${{ inputs.python-version }}-${{ inputs.torch-version }}-
+            build-cache-${{ inputs.component }}-${{ inputs.arch }}-${{ inputs.cuda-version }}-${{ inputs.python-version }}-${{ inputs.torch-version }}-
 
       - name: Unpack resumable build cache
         working-directory: ${{ inputs.path }}
@@ -304,6 +328,7 @@ jobs:
         env:
           COMPONENT: ${{ inputs.component }}
           REF: ${{ inputs.ref }}
+          TARGET_ARCH: ${{ inputs.arch }}
           CUDA_VERSION: ${{ inputs.cuda-version }}
           PYTHON_VERSION: ${{ inputs.python-version }}
           TORCH_VERSION: ${{ inputs.torch-version }}
@@ -337,7 +362,7 @@ jobs:
           HTTPS_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
         with:
           path: ${{ inputs.path }}/build-cache.tar
-          key: build-cache-${{ inputs.component }}-${{ inputs.cuda-version }}-${{ inputs.python-version }}-${{ inputs.torch-version }}-${{ github.run_id }}
+          key: build-cache-${{ inputs.component }}-${{ inputs.arch }}-${{ inputs.cuda-version }}-${{ inputs.python-version }}-${{ inputs.torch-version }}-${{ github.run_id }}
 
       - name: Fail if build did not finish in time
         if: steps.build_wheel.outputs.exit_code == '124'
@@ -365,7 +390,7 @@ jobs:
           HTTP_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
           HTTPS_PROXY: ${{ runner.environment == 'self-hosted' && secrets.BYTED_PROXY || '' }}
         with:
-          name: wheel-${{ inputs.component }}-cu${{ inputs.cuda-version }}-py${{ inputs.python-version }}-torch${{ inputs.torch-version }}
+          name: wheel-${{ inputs.component }}-${{ inputs.arch }}-cu${{ inputs.cuda-version }}-py${{ inputs.python-version }}-torch${{ inputs.torch-version }}
           path: ${{ inputs.path }}/dist/*.whl
           if-no-files-found: error
 
