@@ -1,0 +1,67 @@
+name: Feature request / support
+description: Propose an improvement to the build pipeline, or ask for help using it
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For anything that isn't a broken build and isn't a new image:
+        pipeline improvements, tooling, docs, or a question about how to use
+        the published wheels.
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Is this a proposal or a question?
+      options:
+        - Proposal - I want something changed or added
+        - Support - I need help using the wheels / pipeline
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - versions.yaml / matrix generation
+        - Build scripts (ci/build_scripts)
+        - Workflows / CI
+        - Releases (ci/release_meta.py, _ensure_release.yml)
+        - PEP 503 index / GitHub Pages
+        - Runners (self-hosted, caching, proxy, timeouts)
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's awkward, slow, missing, or unclear today? For a support request, describe what you're trying to do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What you'd like to see instead. Skip this for a pure support request.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you're using, or approaches you rejected and why.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I searched existing issues first
+          required: true
+        - label: I'm willing to open the PR for this

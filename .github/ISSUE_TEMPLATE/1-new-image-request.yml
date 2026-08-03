@@ -1,0 +1,121 @@
+name: New image request
+description: Ask for an image / build combination the wheelhouse does not publish yet
+title: "[image request] "
+labels: ["image", "request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this to **ask for** an image or dependency combination that does not
+        exist yet. If you already know how to build it and intend to do the work,
+        open a *New image building* issue instead (or go straight to a PR).
+
+        Before filing, please check the [releases](../../releases) and the
+        [package index](https://verl-project.github.io/verl-wheelhouse/simple/) -
+        what you need may already be published.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What are you asking for?
+      options:
+        - A new image (container image tag) that does not exist yet
+        - A new CUDA / Python / Torch combination of an existing image
+        - A component (wheel) that is not in the image yet
+        - Not sure - describe below
+    validations:
+      required: true
+
+  - type: input
+    id: cuda
+    attributes:
+      label: CUDA version
+      description: The `cuda` value you need in `versions.yaml`'s `build_matrix`.
+      placeholder: "13.0.2 (currently built) / 12.8.1 / ..."
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.12 (currently built) / 3.11 / ..."
+    validations:
+      required: true
+
+  - type: input
+    id: torch
+    attributes:
+      label: Torch version
+      description: Include torchvision / torchaudio if they matter for your use case.
+      placeholder: "2.11.0 (currently built), torchvision 0.26.0, torchaudio 2.11.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: components
+    attributes:
+      label: Components the image must contain
+      multiple: true
+      options:
+        - apex
+        - transformer-engine
+        - flash-attention
+        - flashinfer
+        - megatron-bridge
+        - vllm (upstream wheel, not built here)
+        - sglang (upstream wheel, not built here)
+        - Something else - described below
+    validations:
+      required: true
+
+  - type: input
+    id: component_refs
+    attributes:
+      label: Required component versions
+      description: Only the ones you actually need pinned; leave the rest to whatever the wheelhouse currently builds.
+      placeholder: "transformer-engine v2.16.1, flash-attn v2.8.3, vllm 0.24.0"
+
+  - type: input
+    id: arch
+    attributes:
+      label: Target GPU architectures
+      description: Compute capabilities you need compiled in, as in `torch_cuda_arch_list`.
+      placeholder: "8.0;9.0;10.0 (A100/H100/B200)"
+    validations:
+      required: true
+
+  - type: input
+    id: base_image
+    attributes:
+      label: Preferred base image
+      description: If you need a specific base (driver/OS/toolkit constraints).
+      placeholder: "nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04"
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why the existing images / wheels don't work
+      description: What you tried, and what broke or is missing.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - Blocking - cannot run verl at all on this hardware
+        - Painful - working around it with a local build
+        - Nice to have
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I searched existing issues and the releases page first
+          required: true
+        - label: I'm willing to open the PR for this

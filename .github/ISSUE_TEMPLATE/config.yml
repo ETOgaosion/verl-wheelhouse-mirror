@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: verl itself (training bugs, usage questions)
+    url: https://github.com/verl-project/verl/issues
+    about: This repo only builds/publishes wheels and images. Anything about verl's own behaviour belongs upstream.
+  - name: How to install published wheels
+    url: https://github.com/verl-project/verl-wheelhouse#installing-built-wheels
+    about: The PEP 503 index URL and per-component release pages, before opening an issue.
+  - name: Maintaining components (bump a version / add a component)
+    url: https://github.com/verl-project/verl-wheelhouse/blob/main/docs/maintaining-components.md
+    about: Step-by-step guide - most version bumps are a one-line versions.yaml edit, no issue needed.
