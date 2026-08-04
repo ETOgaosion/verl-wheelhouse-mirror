@@ -112,6 +112,10 @@ verl_reference_versions:
 #                  arm64 runner), torch_cuda_arch_list (server-class arm
 #                  parts are a much narrower set than x86_64 covers) and
 #                  max_jobs.
+#                  Non-x86_64 rows must name a GitHub-hosted runner
+#                  ("ubuntu-24.04-arm" for aarch64): the only self-hosted
+#                  machine here is x86_64, so a self-hosted arm64 row would
+#                  queue forever. ci/generate_matrix.py rejects one outright.
 # build_timeout:   wall-clock budget for the compile step (e.g. 5h, 10h).
 # job_timeout_minutes: GitHub Actions job timeout for the whole build job;
 #                  must exceed build_timeout plus setup/cache-save overhead.
@@ -156,12 +160,24 @@ components:
     # self-hosted machine has already been driven at without OOM-killing nvcc.
     max_jobs: 32
     runs_on: [self-hosted, Linux, X64]
-    # No arm64 build: apex is one of the two heavy CUDA builds here and the
-    # self-hosted machine it relies on is x86_64-only. GitHub's free arm64
-    # runner has 4 vCPU, which is not a realistic substitute for max_jobs: 32.
-    # Add "aarch64" here (plus an arch_overrides entry pointing at an arm64
-    # runner) once one is available.
-    arches: [x86_64]
+    # No `arches` filter: built for every arch in build_matrix.
+    arch_overrides:
+      aarch64:
+        # The self-hosted machine above is x86_64-only, so arm64 falls back to
+        # GitHub's free 4 vCPU / 16 GB arm64 runner. That is a 16x drop in
+        # parallelism from max_jobs: 32, so this build is expected to exhaust
+        # its 5h budget and finish across a few re-runs off the resumable
+        # build cache rather than in one pass.
+        runs_on: ubuntu-24.04-arm
+        # apex spawns one plain nvcc per translation unit, so this is the whole
+        # concurrency story; 2 is what a 4 vCPU / 16 GB runner (plus the 10 GB
+        # swap file _build.yml adds) sustains without OOM-killing nvcc.
+        max_jobs: 2
+        # GH200 (Grace-Hopper, 9.0) and GB200 (Grace-Blackwell, 10.0) - the
+        # only CUDA parts this wheel can land on. The x86_64 list's
+        # 7.5/8.0/8.6/11.0/12.0 are all x86-attached cards, and each extra
+        # gencode is another full nvcc pass on an already-slow runner.
+        torch_cuda_arch_list: "9.0;10.0"
     extra_env: {}
 
   transformer-engine:
@@ -176,10 +192,18 @@ components:
     # raising it further.
     max_jobs: 16
     runs_on: [self-hosted, Linux, X64]
-    # No arm64 build, for the same reason as apex above - and more so: TE's
-    # effective concurrency is max_jobs x NVTE_BUILD_THREADS_PER_JOB, which
-    # a 4 vCPU runner cannot approximate within the 5h build budget.
-    arches: [x86_64]
+    # No `arches` filter: built for every arch in build_matrix.
+    arch_overrides:
+      aarch64:
+        runs_on: ubuntu-24.04-arm
+        # Effective nvcc concurrency is max_jobs x NVTE_BUILD_THREADS_PER_JOB,
+        # so 1 here (with the inherited extra_env below) is 4 compile threads -
+        # one per vCPU on GitHub's arm64 runner, versus 64 on the self-hosted
+        # x86_64 machine. TE is the largest build in this repo, so expect it to
+        # need several resumed attempts before a wheel lands.
+        max_jobs: 1
+        # Server-class arm parts only; see apex's override above.
+        torch_cuda_arch_list: "9.0;10.0"
     extra_env:
       NVTE_BUILD_THREADS_PER_JOB: "4"
 
@@ -192,14 +216,19 @@ components:
     requires_cudnn: false
     max_jobs: 2
     runs_on: ubuntu-24.04
-    # No arm64 build yet. Two of the three wheels here (flashinfer-python,
-    # flashinfer-cubin) are arch-independent py3-none-any and only need
-    # building once; only flashinfer-jit-cache is arch-specific, and
-    # flashinfer.sh rehosts that one prebuilt from flashinfer.ai, whose
-    # `pip download` resolves for the runner's own platform. Adding aarch64
-    # therefore needs the script to skip the two pure-Python wheels on arm
-    # (otherwise both arches upload the same asset name) before it is useful.
-    arches: [x86_64]
+    # No `arches` filter: built for every arch in build_matrix. Only
+    # flashinfer-jit-cache is arch-specific, so the aarch64 row exists purely
+    # to fetch that wheel for arm - flashinfer.sh emits the two py3-none-any
+    # wheels on x86_64 only, otherwise both arches would upload the same asset
+    # name onto the same release. That makes this the one cheap arm64 job here:
+    # it compiles nothing and just rehosts a prebuilt wheel from flashinfer.ai.
+    arch_overrides:
+      aarch64:
+        runs_on: ubuntu-24.04-arm
+        # Unused in practice (nothing is compiled on the arm row), but kept
+        # consistent with the other components so it stays correct if
+        # flashinfer-python ever grows a compiled component.
+        torch_cuda_arch_list: "9.0a 10.0a"
     extra_env: {}
 
   megatron-bridge:
@@ -219,8 +248,12 @@ components:
     requires_cudnn: false
     max_jobs: 1
     runs_on: ubuntu-24.04
-    # The py3-none-any wheel this produces is byte-for-byte arch-independent,
-    # so building it a second time on arm64 would only race the identical
-    # asset name onto the same release.
+    # The single py3-none-any wheel this produces already installs on every
+    # arch - pip matches it by tag - so it is *covered* on aarch64 without an
+    # aarch64 job. Adding one would build a byte-identical wheel and race the
+    # identical asset name onto the same release from two concurrent jobs, so
+    # this component stays x86_64-only by design rather than for lack of a
+    # runner. (release_covers_component counts an "any" wheel for every arch,
+    # so skip detection agrees.)
     arches: [x86_64]
     extra_env: {}

@@ -194,32 +194,39 @@ in from `${{ github.repository }}`, so no other change is needed.
 
 ## Caveats
 
-- **arm64 wheels are opt-in per component, and only `flash-attention`
-  currently opts in.** The `build_matrix` covers `x86_64` and `aarch64`, but
-  every other component sets `arches: [x86_64]`. `apex` and
-  `TransformerEngine` are excluded because they depend on the x86_64
-  self-hosted machine and GitHub's free 4 vCPU arm64 runner cannot stand in
-  for `max_jobs: 32`/`16`; `Megatron-Bridge` because its wheel is
-  arch-independent `py3-none-any` and only needs building once; `flashinfer`
-  because two of its three wheels are likewise `py3-none-any` and its build
-  script would first need to skip those on arm. Nothing else needs to change
-  to add an arch to a component - drop it into `arches` and give it an
-  `arch_overrides` entry with an arm64 `runs_on` (and usually a narrower
-  `torch_cuda_arch_list`, since every CUDA-capable arm64 host is a
-  GH200/GB200-class part). Everything the toolchain needs already works
+- **Every package is available for arm64, but not every component has an
+  arm64 job.** The `build_matrix` covers `x86_64` and `aarch64`, and
+  `flash-attention`, `apex`, `TransformerEngine` and `flashinfer` all build
+  both. `Megatron-Bridge` deliberately stays `arches: [x86_64]`: its wheel is
+  `py3-none-any`, so the single x86_64 build already installs on arm64, and a
+  second job would only race a byte-identical asset name onto the same
+  release. `flashinfer` is a hybrid for the same reason - two of its three
+  wheels are `py3-none-any`, so `flashinfer.sh` emits those on x86_64 only and
+  the arm64 job contributes just the arch-specific `flashinfer-jit-cache`.
+- **arm64 always builds on GitHub-hosted runners.** The self-hosted machine is
+  x86_64-only, so every `arch_overrides.aarch64` points at `ubuntu-24.04-arm`
+  (GitHub's free 4 vCPU / 16 GB arm64 runner) rather than waiting on arm
+  hardware that doesn't exist. `ci/generate_matrix.py` fails the matrix if a
+  non-x86_64 row names a self-hosted runner, and `_build.yml` separately
+  asserts the runner's `uname -m` matches the row's arch. The practical cost
+  is parallelism: `apex` drops from `max_jobs: 32` to `2` and
+  `TransformerEngine` from an effective 64 compile threads to 4, so both are
+  expected to exhaust their 5h budget and finish across a few re-runs off the
+  resumable build cache. Everything else the toolchain needs already works
   there: `Jimver/cuda-toolkit` rewrites its apt repo path to NVIDIA's `sbsa`
   one, `common.sh`'s `install_cudnn` maps `aarch64` → `sbsa`, and
   download.pytorch.org publishes `manylinux_2_28_aarch64` CUDA wheels. Both
   arches' wheels live on the same per-component release and the PEP 503
   index lists them side by side - pip picks by platform tag.
-- **Two components build on a self-hosted machine.** `apex` and
+- **Two components build on a self-hosted machine (x86_64 only).** `apex` and
   `TransformerEngine` are the heavy CUDA builds here, so their `runs_on`
   points at a self-hosted runner (`[self-hosted, Linux, X64]`) and their
   `max_jobs` is raised accordingly (32 and 16 - TransformerEngine multiplies
-  that by `NVTE_BUILD_THREADS_PER_JOB=4`). `flash-attention`, `flashinfer`
-  and `Megatron-Bridge` stay on free GitHub-hosted runners with capped
-  parallelism. `runs-on` and `max_jobs` are both plain per-component fields
-  in `versions.yaml`, so moving a component between the two (or dialing
+  that by `NVTE_BUILD_THREADS_PER_JOB=4`). Their aarch64 rows fall back to
+  GitHub's arm64 runner, as above. `flash-attention`, `flashinfer` and
+  `Megatron-Bridge` stay on free GitHub-hosted runners on both arches with
+  capped parallelism. `runs-on` and `max_jobs` are both plain per-component
+  fields in `versions.yaml`, so moving a component between the two (or dialing
   parallelism up towards verl's own `128`/`256`) is a one-line edit with no
   workflow changes.
 - **Build time on free runners.** Builds that stay on GitHub-hosted runners

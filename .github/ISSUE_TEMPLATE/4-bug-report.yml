@@ -94,6 +94,7 @@ body:
       label: Runner (for CI failures)
       options:
         - ubuntu-24.04 (GitHub-hosted)
+        - ubuntu-24.04-arm (GitHub-hosted, aarch64)
         - self-hosted, Linux, X64
         - Not applicable
 
