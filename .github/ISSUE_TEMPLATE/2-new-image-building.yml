@@ -70,9 +70,10 @@ body:
     id: runner
     attributes:
       label: Runner
-      description: Heavy CUDA builds (apex, TransformerEngine) run on the self-hosted machine and need the `BYTED_PROXY` secret for uploads.
+      description: Heavy CUDA builds (apex, TransformerEngine) run on the self-hosted machine and need the `BYTED_PROXY` secret for uploads. aarch64 builds always use GitHub-hosted arm64 runners - the self-hosted machine is x86_64-only.
       options:
         - ubuntu-24.04 (GitHub-hosted)
+        - ubuntu-24.04-arm (GitHub-hosted, aarch64)
         - self-hosted, Linux, X64
         - Mixed - per component, as configured in versions.yaml
     validations:

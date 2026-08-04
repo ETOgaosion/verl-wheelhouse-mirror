@@ -76,7 +76,7 @@ component builds every arch in the matrix unless it narrows that with
 ```yaml
 arch_overrides:
   aarch64:
-    runs_on: ubuntu-24.04-arm # or [self-hosted, Linux, ARM64]
+    runs_on: ubuntu-24.04-arm # GitHub-hosted arm64; self-hosted is rejected
     torch_cuda_arch_list: "9.0;10.0" # arm64 CUDA hosts are GH200/GB200-class only
 ```
 
@@ -86,6 +86,16 @@ wheel - make the build script skip that wheel when `$TARGET_ARCH` is not
 `x86_64`, or both arches will upload the same asset name. `_build.yml`
 asserts the runner's `uname -m` matches the row's arch. No other change is
 needed; CUDA, cuDNN, NCCL and torch installation are already arch-aware.
+
+Non-x86_64 rows must stay on GitHub-hosted runners: the only self-hosted
+machine here is x86_64, so a self-hosted arm64 row would queue forever.
+`ci/generate_matrix.py` fails the matrix rather than emitting one. Expect
+much lower `max_jobs` on the arm row (4 vCPU) and several resumed attempts
+for the heavy builds.
+
+`flash-attention`, `apex`, `transformer-engine` and `flashinfer` build both
+arches; `megatron-bridge` is x86_64-only because its `py3-none-any` wheel
+already covers arm64.
 
 Each arch is a separate job. To build just one, dispatch
 `build-<component>.yml` with its `arch` input (or pass

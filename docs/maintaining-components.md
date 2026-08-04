@@ -173,16 +173,24 @@ components:
         runs_on: ubuntu-24.04-arm
         torch_cuda_arch_list: "9.0;10.0"
 
-  apex:
+  megatron-bridge:
     arches: [x86_64] # opt out of arm64 entirely
 ```
+
+`flash-attention`, `apex`, `TransformerEngine` and `flashinfer` all build both
+arches. `Megatron-Bridge` is the only opt-out, and not for lack of a runner:
+it emits a single `py3-none-any` wheel that already installs on arm64, so a
+second job would just race an identical asset name onto the same release.
 
 To turn arm64 on for a component:
 
 1. Remove its `arches: [x86_64]` line (or add `aarch64` to the list).
 2. Add an `arch_overrides.aarch64` block with, at minimum, an arm64
-   `runs_on` - `ubuntu-24.04-arm` for GitHub's free 4 vCPU arm64 runner, or
-   your own `[self-hosted, Linux, ARM64]` labels. `_build.yml` asserts
+   `runs_on`. This must be a **GitHub-hosted** runner - `ubuntu-24.04-arm`,
+   GitHub's free 4 vCPU arm64 machine - so that arm64 support never depends
+   on someone standing up matching hardware first; the one self-hosted
+   machine this repo uses is x86_64-only. `ci/generate_matrix.py` refuses to
+   emit a non-x86_64 row on a self-hosted runner, and `_build.yml` asserts
    `uname -m` matches the row's arch, so a runner/arch mismatch fails in
    seconds instead of after a multi-hour build.
 3. Narrow `torch_cuda_arch_list` for that arch. Every CUDA-capable arm64

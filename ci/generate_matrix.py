@@ -51,6 +51,11 @@ _TAG_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # one left implicit in release titles (see release_title).
 DEFAULT_ARCH = "x86_64"
 
+# GitHub identifies every self-hosted runner by this label, whatever else it
+# carries, so its presence in a `runs_on` is what distinguishes a self-hosted
+# row from a GitHub-hosted one.
+SELF_HOSTED_LABEL = "self-hosted"
+
 # Wheel platform-tag suffixes mapped to the build_matrix `arch` they satisfy,
 # e.g. "manylinux_2_28_aarch64" -> aarch64.
 _PLATFORM_TAG_ARCHES = {
@@ -111,10 +116,33 @@ def component_combos(versions: Dict[str, Any], component: str) -> List[Dict[str,
     return [combo for combo in versions["build_matrix"] if combo_arch(combo) in arches]
 
 
+def check_runner_policy(component: str, arch: str, runs_on: Any) -> None:
+    """Reject a self-hosted runner on anything but the default arch.
+
+    The only self-hosted machine this repo builds on is x86_64, and non-x86_64
+    builds are deliberately kept on GitHub's hosted runners (`ubuntu-*-arm`
+    for aarch64) so that adding an arch never depends on someone standing up
+    matching hardware first. A self-hosted label on such a row would otherwise
+    queue forever waiting for a runner that does not exist, or - if one is
+    ever registered under a mismatched arch - burn the job's setup time before
+    _build.yml's `uname -m` assertion catches it.
+    """
+    if arch == DEFAULT_ARCH:
+        return
+    labels = runs_on if isinstance(runs_on, list) else [runs_on]
+    if any(str(label).strip().lower() == SELF_HOSTED_LABEL for label in labels):
+        raise SystemExit(
+            f"Component {component!r} points its {arch} build at a self-hosted runner "
+            f"({runs_on!r}). Non-{DEFAULT_ARCH} builds must use a GitHub-hosted runner "
+            f"(e.g. 'ubuntu-24.04-arm' for aarch64); see arch_overrides in versions.yaml."
+        )
+
+
 def component_config(versions: Dict[str, Any], component: str, arch: str) -> Dict[str, Any]:
     """One component's config with its `arch_overrides` for `arch` applied."""
     cfg = dict(get_component(versions, component))
     cfg.update((cfg.pop("arch_overrides", None) or {}).get(arch) or {})
+    check_runner_policy(component, arch, cfg["runs_on"])
     return cfg
 
 
