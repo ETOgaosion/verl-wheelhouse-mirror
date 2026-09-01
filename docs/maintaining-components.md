@@ -177,7 +177,8 @@ components:
     arches: [x86_64] # opt out of arm64 entirely
 ```
 
-`flash-attention`, `apex`, `TransformerEngine` and `flashinfer` all build both
+`flash-attention`, `apex`, `TransformerEngine`, `flashinfer`, `deep-ep` and
+`flash-mla` all build both
 arches. `Megatron-Bridge` is the only opt-out, and not for lack of a runner:
 it emits a single `py3-none-any` wheel that already installs on arm64, so a
 second job would just race an identical asset name onto the same release.
@@ -236,10 +237,10 @@ where needed:
 
 | Consumer | Format | Handled by |
 |---|---|---|
-| apex | dotted + semicolons, e.g. `8.0;9.0;12.0` | used as-is |
+| apex, deep-ep | dotted + semicolons, e.g. `8.0;9.0;12.0` | used as-is |
 | flash-attention, TransformerEngine | undotted, e.g. `80;90;120` | `ci/build_scripts/common.sh`'s `arch_list_strip_dots` |
 | flashinfer | space-separated with PTX-family suffixes, e.g. `8.0 9.0a 12.0f` | given verbatim in `versions.yaml` (suffixes can't be derived mechanically) |
-| Megatron-Bridge (pure-Python) | n/a | set `torch_cuda_arch_list: null` for components that build no CUDA code, or that hardcode their own gencode flags |
+| Megatron-Bridge (pure-Python), flash-mla (hardcodes `sm90a`/`sm100f`) | n/a | set `torch_cuda_arch_list: null` for components that build no CUDA code, or that hardcode their own gencode flags |
 
 ## See also
 

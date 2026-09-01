@@ -10,6 +10,8 @@ heavy native-extension dependencies of [verl](https://github.com/verl-project/ve
 | [flash-attention](https://github.com/Dao-AILab/flash-attention) | `flash-attention` | `flash_attn` |
 | [flashinfer](https://github.com/flashinfer-ai/flashinfer) | `flashinfer` | `flashinfer-python`, `flashinfer-cubin`, `flashinfer-jit-cache` |
 | [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) | `Megatron-Bridge` | `megatron-bridge` (pure-Python `py3-none-any` wheel) |
+| [DeepEP](https://github.com/deepseek-ai/DeepEP) | `DeepEP` | `deep-ep` (MoE all-to-all, linked against NVSHMEM) |
+| [FlashMLA](https://github.com/deepseek-ai/FlashMLA) | `FlashMLA` | `flash-mla` (MLA decode/prefill, `sm90a` + `sm100f`) |
 
 The rollout engines (`vllm`, `sglang`) are deliberately *not* built here -
 upstream's own published wheels are used instead.
@@ -45,6 +47,8 @@ ci/
     flash_attention.sh
     flashinfer.sh
     megatron_bridge.sh
+    deep_ep.sh
+    flash_mla.sh
 .github/workflows/
   _build.yml              # reusable single-combination build workflow
   _ensure_release.yml     # reusable: create/update a component's release
@@ -53,6 +57,8 @@ ci/
   build-flash-attention.yml
   build-flashinfer.yml
   build-megatron-bridge.yml
+  build-deep-ep.yml
+  build-flash-mla.yml
   build-all.yml           # builds every component x every matrix combo
   release.yml             # on `v*` tag push: full-matrix build + upload
   publish-index.yml       # (re)publishes the GitHub Pages PEP 503 index
@@ -196,8 +202,8 @@ in from `${{ github.repository }}`, so no other change is needed.
 
 - **Every package is available for arm64, but not every component has an
   arm64 job.** The `build_matrix` covers `x86_64` and `aarch64`, and
-  `flash-attention`, `apex`, `TransformerEngine` and `flashinfer` all build
-  both. `Megatron-Bridge` deliberately stays `arches: [x86_64]`: its wheel is
+  `flash-attention`, `apex`, `TransformerEngine`, `flashinfer`, `deep-ep` and
+  `flash-mla` all build both. `Megatron-Bridge` deliberately stays `arches: [x86_64]`: its wheel is
   `py3-none-any`, so the single x86_64 build already installs on arm64, and a
   second job would only race a byte-identical asset name onto the same
   release. `flashinfer` is a hybrid for the same reason - two of its three
@@ -250,6 +256,21 @@ in from `${{ github.repository }}`, so no other change is needed.
   `BYTED_PROXY` is missing, and every transfer that would use it carries a
   `timeout-minutes` cap so a stalled upload fails within the hour instead of
   sitting on the runner until the job times out.
+- **The DeepSeek kernels carry two constraints the other components don't.**
+  `deep-ep` links NVSHMEM and bakes `-Wl,-rpath,$NVSHMEM_DIR/lib` into its
+  extension, so its wheel only resolves libnvshmem where that directory exists:
+  `common.sh`'s `install_nvshmem` therefore installs
+  `nvidia-nvshmem-cu<major>==<extra_env NVSHMEM_VERSION>` into
+  `/usr/local/lib/python<X.Y>/dist-packages`, the same absolute path verl's
+  `docker/Dockerfile.uv.cu130` installs it to. Bumping the NVSHMEM version on
+  either side without the other leaves the wheel pointing at a directory the
+  image no longer has. Both projects also append `+<short git sha>` to their
+  own version with no opt-out; since GitHub rewrites `+` to `.` in release
+  asset filenames (which would desync the filename from the wheel's own
+  METADATA), `common.sh`'s `strip_wheel_local_version` removes the segment
+  after the build. Their wheels are therefore plain `deep-ep 1.2.1` /
+  `flash-mla 1.0.0`, and - as with `apex` - the exact commit lives in the
+  release tag and title rather than in the version.
 - **`apex` tracks `master`** (both verl Dockerfiles build it unpinned), so it
   effectively behaves like a rolling release under the fixed tag
   `apex-master`; every other component tracks a specific tag and gets a fresh

@@ -91,6 +91,140 @@ install_nccl() {
 }
 
 # ---------------------------------------------------------------------------
+# ensure_cuda_cccl_include_path: put CUDA 13's CCCL headers on CPATH.
+#
+# CUDA 13 moved libcu++ / cub / thrust out of the toolkit's top-level include/
+# and into include/cccl/. nvcc finds them there on its own, but the *host*
+# compiler does not, so a `#include <cuda/std/...>` reached from a .cpp
+# translation unit (deep-ep's csrc/deep_ep.cpp, FlashMLA's cutlass headers)
+# fails to resolve without help. verl's own Dockerfiles do the same thing -
+# `export CPATH=/usr/local/cuda/targets/<target>/include/cccl:$CPATH` in
+# docker/Dockerfile.stable.vllm / .sglang, a /usr/local/cuda-cccl symlink on
+# CPATH in docker/Dockerfile.uv.cu130. A no-op warning on toolkits that
+# predate the move (their headers are already on the default search path).
+# ---------------------------------------------------------------------------
+ensure_cuda_cccl_include_path() {
+  local cuda_home target include_dir
+  cuda_home="${CUDA_HOME:-${CUDA_PATH:-/usr/local/cuda}}"
+  case "$(uname -m)" in
+    aarch64) target="sbsa-linux" ;;
+    *) target="x86_64-linux" ;;
+  esac
+
+  for include_dir in \
+    "${cuda_home}/targets/${target}/include/cccl" \
+    "${cuda_home}/include/cccl"; do
+    if [ -d "${include_dir}" ]; then
+      export CPATH="${include_dir}${CPATH:+:${CPATH}}"
+      echo "CCCL headers: added ${include_dir} to CPATH"
+      return 0
+    fi
+  done
+
+  echo "::warning::No cccl include directory found under ${cuda_home}; leaving CPATH unchanged."
+}
+
+# ---------------------------------------------------------------------------
+# install_nvshmem: install NVIDIA's NVSHMEM pip package at the same absolute
+# path verl's runtime image puts it, and export NVSHMEM_DIR pointing there.
+#
+# deep-ep links NVSHMEM and bakes `-Wl,-rpath,${NVSHMEM_DIR}/lib` into
+# deep_ep_cpp.so, so a *prebuilt* wheel only resolves libnvshmem at run time if
+# that same directory exists on the target machine. verl's
+# docker/Dockerfile.uv.cu130 deliberately installs nvidia-nvshmem-cu<major> as
+# a system pip package under /usr/local/lib/python<X.Y>/dist-packages (not into
+# a venv), so this targets that exact path instead of the runner's own
+# site-packages. Keep NVSHMEM_VERSION (extra_env in versions.yaml) in sync with
+# that Dockerfile's NVSHMEM_VERSION arg.
+#
+# Setting NVSHMEM_DIR also makes deep-ep's setup.py link the unversioned
+# `-l:libnvshmem_host.so`, which the pip package does not ship - hence the
+# symlink, mirroring the one that Dockerfile creates. Only the build needs it:
+# what gets recorded in the .so is the library's SONAME
+# (libnvshmem_host.so.<major>), which the pip package does ship.
+# ---------------------------------------------------------------------------
+install_nvshmem() {
+  local version="${NVSHMEM_VERSION:?NVSHMEM_VERSION must be set (see extra_env in versions.yaml)}"
+  local cuda_major site_dir host_lib
+  local host_libs=()
+  cuda_major="$(echo "${CUDA_VERSION}" | cut -d. -f1)"
+  site_dir="/usr/local/lib/python${PYTHON_VERSION}/dist-packages"
+
+  echo "::group::Install nvidia-nvshmem-cu${cuda_major}==${version} into ${site_dir}"
+  maybe_sudo pip install --upgrade --target "${site_dir}" \
+    "nvidia-nvshmem-cu${cuda_major}==${version}"
+
+  export NVSHMEM_DIR="${site_dir}/nvidia/nvshmem"
+  host_libs=("${NVSHMEM_DIR}"/lib/libnvshmem_host.so.*)
+  if [ ! -e "${host_libs[0]}" ]; then
+    echo "::error::No libnvshmem_host.so.* under ${NVSHMEM_DIR}/lib after installing the wheel" >&2
+    return 1
+  fi
+  host_lib="$(basename "${host_libs[0]}")"
+  maybe_sudo ln -sf "${host_lib}" "${NVSHMEM_DIR}/lib/libnvshmem_host.so"
+
+  echo "NVSHMEM_DIR=${NVSHMEM_DIR} (build-time symlink -> ${host_lib})"
+  echo "::endgroup::"
+}
+
+# ---------------------------------------------------------------------------
+# strip_wheel_local_version: rewrite the wheels in a dist dir to drop the PEP
+# 440 local version segment their build appended (deep-ep and flash-mla both
+# tack "+<short git sha>" onto their own version).
+#
+# GitHub's release-asset upload rewrites "+" to "." in the stored filename (it
+# arrives URL-encoded as a space), so deep_ep-1.2.1+3f601f7-...whl would land
+# on the release as deep_ep-1.2.1.3f601f7-...whl - a filename whose version no
+# longer matches the METADATA inside, which pip and uv both reject. Neither
+# project has an opt-out env var (there is no equivalent of TransformerEngine's
+# NVTE_NO_LOCAL_VERSION), so the segment is stripped from the built artifact
+# here instead. Nothing is lost: the exact commit a wheel came from is what the
+# component's release tag and title record.
+#
+# Requires the `wheel` package, which every caller installs anyway.
+# ---------------------------------------------------------------------------
+strip_wheel_local_version() {
+  local dist_dir="${1:-dist}"
+  local wheel unpack_dir pkg_dir clean_pkg_dir meta_dir version clean_version
+
+  for wheel in "${dist_dir}"/*.whl; do
+    [ -e "${wheel}" ] || continue
+    case "$(basename "${wheel}")" in
+      *+*) ;;
+      *) continue ;;
+    esac
+
+    unpack_dir="$(mktemp -d)"
+    python -m wheel unpack --dest "${unpack_dir}" "${wheel}"
+    pkg_dir="$(find "${unpack_dir}" -mindepth 1 -maxdepth 1 -type d)"
+    meta_dir="$(find "${pkg_dir}" -mindepth 1 -maxdepth 1 -type d -name '*.dist-info')"
+
+    version="$(sed -n 's/^Version: //p' "${meta_dir}/METADATA" | head -1)"
+    clean_version="${version%%+*}"
+    sed "s/^Version: .*/Version: ${clean_version}/" "${meta_dir}/METADATA" > "${meta_dir}/METADATA.rewritten"
+    mv "${meta_dir}/METADATA.rewritten" "${meta_dir}/METADATA"
+
+    # The version is spelled out again in the unpacked root's name and in the
+    # .dist-info (plus .data, for wheels that have one) directories inside it.
+    # Substitute on each basename in turn - a path-wide substitution would
+    # rewrite the parent directory's copy of the version instead. `wheel pack`
+    # reads the name and version back out of .dist-info to build the new
+    # filename, and regenerates RECORD itself.
+    clean_pkg_dir="${unpack_dir}/$(basename "${pkg_dir}" | sed "s/${version}\$/${clean_version}/")"
+    mv "${pkg_dir}" "${clean_pkg_dir}"
+    for meta_dir in "${clean_pkg_dir}"/*.dist-info "${clean_pkg_dir}"/*.data; do
+      [ -d "${meta_dir}" ] || continue
+      mv "${meta_dir}" "${clean_pkg_dir}/$(basename "${meta_dir}" | sed "s/${version}\./${clean_version}./")"
+    done
+
+    echo "Repacking $(basename "${wheel}") without its local version segment (${version} -> ${clean_version})"
+    rm -f "${wheel}"
+    python -m wheel pack --dest-dir "${dist_dir}" "${clean_pkg_dir}"
+    rm -rf "${unpack_dir}"
+  done
+}
+
+# ---------------------------------------------------------------------------
 # arch_list_strip_dots: convert the canonical "8.0;9.0;10.0;12.0" arch list
 # into the undotted "80;90;100;120" form that flash-attention's
 # FLASH_ATTN_CUDA_ARCHS and TransformerEngine's NVTE_CUDA_ARCHS expect.

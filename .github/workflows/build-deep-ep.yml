@@ -1,0 +1,93 @@
+name: Build deep-ep
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "CPU arch to build (all = every arch this component opts into)"
+        type: choice
+        default: all
+        # Choices must be static, so this mirrors versions.yaml's build_matrix
+        # arches by hand; generate_matrix.py rejects any that aren't in it.
+        options: [all, x86_64, aarch64]
+  push:
+    branches: [main]
+    paths:
+      - "versions.yaml"
+      - "ci/generate_matrix.py"
+      - "ci/build_scripts/common.sh"
+      - "ci/build_scripts/deep_ep.sh"
+      - ".github/workflows/_build.yml"
+      - ".github/workflows/build-deep-ep.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  compute-matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_builds: ${{ steps.matrix.outputs.has_builds }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - id: matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          # Only workflow_dispatch carries an arch choice; a push always
+          # builds every arch the component opts into.
+          ARCH: ${{ inputs.arch || 'all' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=()
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            args+=(--skip-existing-releases --repo "$GITHUB_REPOSITORY")
+          fi
+          python3 ci/generate_matrix.py --component deep-ep --arch "$ARCH" --github-output "${args[@]}"
+
+  build:
+    needs: compute-matrix
+    if: needs.compute-matrix.outputs.has_builds == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.compute-matrix.outputs.matrix) }}
+    uses: ./.github/workflows/_build.yml
+    with:
+      component: ${{ matrix.component }}
+      path: ${{ matrix.path }}
+      ref: ${{ matrix.ref }}
+      builder: ${{ matrix.builder }}
+      runs-on: ${{ matrix.runs_on }}
+      arch: ${{ matrix.arch }}
+      cuda-version: ${{ matrix.cuda }}
+      python-version: ${{ matrix.python }}
+      torch-version: ${{ matrix.torch }}
+      torch-vision-version: ${{ matrix.torch_vision }}
+      torch-audio-version: ${{ matrix.torch_audio }}
+      cxx11-abi: ${{ matrix.cxx11_abi }}
+      torch-cuda-arch-list: ${{ matrix.torch_cuda_arch_list }}
+      requires-cudnn: ${{ matrix.requires_cudnn }}
+      max-jobs: ${{ matrix.max_jobs }}
+      extra-env: ${{ matrix.extra_env }}
+      build-timeout: ${{ matrix.build_timeout }}
+      job-timeout-minutes: ${{ matrix.job_timeout_minutes }}
+      upload-to-release: ${{ github.event_name == 'push' }}
+      release-version: ${{ matrix.release_tag }}
+
+  publish-index:
+    needs: build
+    if: github.event_name == 'push' && needs.build.result == 'success'
+    uses: ./.github/workflows/publish-index.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

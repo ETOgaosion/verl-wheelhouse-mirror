@@ -13,3 +13,9 @@
 [submodule "Megatron-Bridge"]
 	path = Megatron-Bridge
 	url = https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+[submodule "DeepEP"]
+	path = DeepEP
+	url = https://github.com/deepseek-ai/DeepEP.git
+[submodule "FlashMLA"]
+	path = FlashMLA
+	url = https://github.com/deepseek-ai/FlashMLA.git

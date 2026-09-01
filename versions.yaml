@@ -257,3 +257,66 @@ components:
     # so skip detection agrees.)
     arches: [x86_64]
     extra_env: {}
+
+  deep-ep:
+    # DeepSeek's MoE all-to-all kernels. verl builds this from source at image
+    # build time (docker/Dockerfile.uv.cu130 + the deep-ep entry in its
+    # pyproject.toml [tool.uv.sources]); prebuilding it here takes that compile,
+    # and the NVSHMEM/CCCL build environment it needs, out of every image build.
+    path: DeepEP
+    # Upstream's v1.2.1 tag is a different commit; this is the exact rev verl
+    # pins, so keep the two in lockstep when either moves.
+    ref: 3f601f7ac1c062c46502646ff04c535013bfca00
+    builder: deep_ep
+    # setup.py's distribution name is deep_ep, which normalizes to deep-ep.
+    wheel_packages: [deep-ep]
+    # DeepEP is Hopper-and-newer only, so this is the same pair verl's own image
+    # builds rather than the wider x86_64 list the other components carry. Note
+    # setup.py disables its aggressive PTX LD/ST tricks for anything but a bare
+    # "9.0" - adding 10.0 is what verl's image already does.
+    torch_cuda_arch_list: "9.0;10.0"
+    requires_cudnn: false
+    # Eight translation units, but -rdc=true device linking makes the tail of
+    # the build memory-hungry; 2 is what a 4 vCPU / 16 GB runner (plus the 10 GB
+    # swap file _build.yml adds) sustains without OOM-killing nvcc.
+    max_jobs: 2
+    runs_on: ubuntu-24.04
+    # No `arches` filter: arm64 is the arch that benefits most (a GB200/GH200
+    # image otherwise compiles this under QEMU), and the arch list above is
+    # already the server-class pair, so the arm row only needs its own runner.
+    arch_overrides:
+      aarch64:
+        runs_on: ubuntu-24.04-arm
+    extra_env:
+      # Must match docker/Dockerfile.uv.cu130's NVSHMEM_VERSION arg: the wheel
+      # bakes an rpath to this NVSHMEM install into deep_ep_cpp.so, so the image
+      # has to end up with the same version at the same path. See common.sh's
+      # install_nvshmem.
+      NVSHMEM_VERSION: "3.4.5"
+
+  flash-mla:
+    # DeepSeek's MLA decode/prefill kernels, the other source build verl's
+    # uv image compiles per build (vllm vendors its own copy; this wheel is for
+    # the megatron / sglang paths).
+    path: FlashMLA
+    # Upstream publishes no tags, so this is verl's pinned rev verbatim.
+    ref: 15f13e5030374295491c5ce31b02d7e63a7772c6
+    builder: flash_mla
+    # setup.py's distribution name is flash_mla, which normalizes to flash-mla.
+    wheel_packages: [flash-mla]
+    # null: setup.py emits its own "-gencode arch=compute_90a,code=sm_90a" and
+    # "compute_100f/sm_100f" flags and never reads TORCH_CUDA_ARCH_LIST.
+    torch_cuda_arch_list: null
+    requires_cudnn: false
+    # ~25 cutlass-heavy translation units - the largest build here after
+    # TransformerEngine. Effective nvcc concurrency is max_jobs x NVCC_THREADS
+    # (pinned to 2 below), so this is 4 compile threads, one per vCPU.
+    max_jobs: 2
+    runs_on: ubuntu-24.04
+    arch_overrides:
+      aarch64:
+        runs_on: ubuntu-24.04-arm
+    extra_env:
+      # setup.py defaults this to 32, which oversubscribes a 4 vCPU runner by an
+      # order of magnitude.
+      NVCC_THREADS: "2"
