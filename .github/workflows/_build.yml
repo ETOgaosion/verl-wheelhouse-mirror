@@ -263,7 +263,12 @@ jobs:
           # cccl ships cuda/atomic, cuda/std/*, thrust, cub headers. CUDA 13
           # moved them under include/cccl/; host C++ builds need the cccl
           # include root on the search path (see ensure_cuda_cccl_include_path).
-          sub-packages: '["nvcc", "cudart", "nvrtc", "nvrtc-dev", "nvml-dev", "nvtx", "profiler-api", "cccl"]'
+          # driver-dev is the only home of the libcuda.so *stub* on CUDA 13
+          # (targets/<t>/lib/stubs/) - neither cudart nor cudart-dev carries it.
+          # A build machine has no NVIDIA driver, so any component that links
+          # the driver API (deep-ep's hybrid_ep extension) links that stub; see
+          # ensure_cuda_stub_library_path for the matching link-path setup.
+          sub-packages: '["nvcc", "cudart", "nvrtc", "nvrtc-dev", "nvml-dev", "nvtx", "profiler-api", "cccl", "driver-dev"]'
           non-cuda-sub-packages: '["libcublas", "libcublas-dev", "libcusolver", "libcusolver-dev", "libcusparse", "libcusparse-dev", "libcurand", "libcurand-dev", "libcufft", "libcufft-dev"]'
 
       - name: Install cuDNN

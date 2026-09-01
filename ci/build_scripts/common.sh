@@ -91,6 +91,30 @@ install_nccl() {
 }
 
 # ---------------------------------------------------------------------------
+# install_rdma_devel: userspace RDMA/InfiniBand headers and libraries.
+#
+# deep-ep's csrc/kernels/configs.cuh includes <infiniband/mlx5dv.h> for its
+# IBGDA path, so every translation unit that pulls configs.cuh in - the .cpp as
+# well as the .cu files - fails to compile without these. GitHub's runner images
+# don't carry them; verl's docker/Dockerfile.uv.cu130 apt-installs the same set
+# in its base stage (its "RDMA/IB" superset of the sglang/vllm basic stages).
+#
+# libibverbs-dev is the one that actually matters (it ships
+# /usr/include/infiniband/mlx5dv.h alongside verbs.h); librdmacm-dev and
+# ibverbs-providers come along to mirror that image, the latter supplying the
+# libmlx5 provider itself.
+# ---------------------------------------------------------------------------
+install_rdma_devel() {
+  echo "::group::Install RDMA/InfiniBand development packages"
+  maybe_sudo apt-get update
+  maybe_sudo apt-get install -y --no-install-recommends \
+    libibverbs-dev \
+    librdmacm-dev \
+    ibverbs-providers
+  echo "::endgroup::"
+}
+
+# ---------------------------------------------------------------------------
 # ensure_cuda_cccl_include_path: put CUDA 13's CCCL headers on CPATH.
 #
 # CUDA 13 moved libcu++ / cub / thrust out of the toolkit's top-level include/
@@ -122,6 +146,41 @@ ensure_cuda_cccl_include_path() {
   done
 
   echo "::warning::No cccl include directory found under ${cuda_home}; leaving CPATH unchanged."
+}
+
+# ---------------------------------------------------------------------------
+# ensure_cuda_stub_library_path: put the toolkit's libcuda.so stub on the link
+# path.
+#
+# deep-ep's hybrid_ep extension declares libraries=["cuda"], i.e. it links the
+# CUDA driver API. Build machines have no NVIDIA driver, so that resolves
+# against the toolkit's stub instead - harmless, because what ends up recorded
+# in the .so is the real SONAME libcuda.so.1, which the GPU host provides at run
+# time. torch's cpp_extension only ever adds $CUDA_HOME/lib64 to the link path,
+# never lib64/stubs, so point the linker there via LIBRARY_PATH (link-time only:
+# unlike an -rpath it leaves nothing behind in the built object). The stub
+# itself comes from the driver-dev sub-package installed by _build.yml.
+# ---------------------------------------------------------------------------
+ensure_cuda_stub_library_path() {
+  local cuda_home target stub_dir
+  cuda_home="${CUDA_HOME:-${CUDA_PATH:-/usr/local/cuda}}"
+  case "$(uname -m)" in
+    aarch64) target="sbsa-linux" ;;
+    *) target="x86_64-linux" ;;
+  esac
+
+  for stub_dir in \
+    "${cuda_home}/lib64/stubs" \
+    "${cuda_home}/targets/${target}/lib/stubs"; do
+    if [ -e "${stub_dir}/libcuda.so" ]; then
+      export LIBRARY_PATH="${stub_dir}${LIBRARY_PATH:+:${LIBRARY_PATH}}"
+      echo "CUDA driver stub: added ${stub_dir} to LIBRARY_PATH"
+      return 0
+    fi
+  done
+
+  echo "::error::No libcuda.so stub under ${cuda_home}; is the cuda-toolkit driver-dev sub-package installed?" >&2
+  return 1
 }
 
 # ---------------------------------------------------------------------------
