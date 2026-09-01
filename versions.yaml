@@ -320,3 +320,39 @@ components:
       # setup.py defaults this to 32, which oversubscribes a 4 vCPU runner by an
       # order of magnitude.
       NVCC_THREADS: "2"
+
+  fast-hadamard-transform:
+    # Dao-AILab's Hadamard-transform kernels, needed by Megatron's DeepSeek
+    # sparse attention. The last kernel verl's docker/Dockerfile.uv.cu130 still
+    # compiled from git at `uv sync` time, and not a cheap one: setup.py emits a
+    # fixed nine gencodes on CUDA 13 (see torch_cuda_arch_list below), so every
+    # image build paid for all nine.
+    path: fast-hadamard-transform
+    # Upstream's v1.1.0 tag predates this commit; this is the exact rev verl
+    # pins, so keep the two in lockstep when either moves.
+    ref: e7706faf8d1c3b9f241e36860640ad1dac644ede
+    builder: fast_hadamard_transform
+    # setup.py's PACKAGE_NAME is fast_hadamard_transform -> fast-hadamard-transform.
+    wheel_packages: [fast-hadamard-transform]
+    # null: setup.py hardcodes its own gencode flags from the *toolkit* version
+    # and never reads TORCH_CUDA_ARCH_LIST. On CUDA 13 that is sm_75, sm_80,
+    # sm_87, sm_90, sm_100, sm_103, sm_110, sm_120 and sm_121 - which is why this
+    # is slow to build, and also why the published wheel covers far more parts
+    # than the "9.0;10.0" verl's own image build was nominally limited to.
+    torch_cuda_arch_list: null
+    requires_cudnn: false
+    # Two translation units (one .cpp, one .cu), so MAX_JOBS alone buys almost
+    # nothing here - the parallelism that matters is nvcc's own --threads across
+    # those nine gencodes, which setup.py defaults to 4. 2 x 4 is what upstream's
+    # own publish.yml runs on the same 4 vCPU / 16 GB runner ("Limit MAX_JOBS
+    # otherwise the github runner goes OOM"), so extra_env leaves NVCC_THREADS
+    # at that default rather than pinning it the way flash-mla has to.
+    max_jobs: 2
+    runs_on: ubuntu-24.04
+    # No `arches` filter: verl's megatron extra is spelled once for both arches,
+    # so an aarch64 wheel has to exist or `uv sync --extra megatron` finds
+    # nothing there. The gencode list is fixed either way (see above).
+    arch_overrides:
+      aarch64:
+        runs_on: ubuntu-24.04-arm
+    extra_env: {}

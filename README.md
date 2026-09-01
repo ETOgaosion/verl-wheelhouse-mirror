@@ -12,6 +12,7 @@ heavy native-extension dependencies of [verl](https://github.com/verl-project/ve
 | [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) | `Megatron-Bridge` | `megatron-bridge` (pure-Python `py3-none-any` wheel) |
 | [DeepEP](https://github.com/deepseek-ai/DeepEP) | `DeepEP` | `deep-ep` (MoE all-to-all, linked against NVSHMEM) |
 | [FlashMLA](https://github.com/deepseek-ai/FlashMLA) | `FlashMLA` | `flash-mla` (MLA decode/prefill, `sm90a` + `sm100f`) |
+| [fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform) | `fast-hadamard-transform` | `fast-hadamard-transform` (Hadamard kernels for DeepSeek sparse attention) |
 
 The rollout engines (`vllm`, `sglang`) are deliberately *not* built here -
 upstream's own published wheels are used instead.
@@ -49,6 +50,7 @@ ci/
     megatron_bridge.sh
     deep_ep.sh
     flash_mla.sh
+    fast_hadamard_transform.sh
 .github/workflows/
   _build.yml              # reusable single-combination build workflow
   _ensure_release.yml     # reusable: create/update a component's release
@@ -59,6 +61,7 @@ ci/
   build-megatron-bridge.yml
   build-deep-ep.yml
   build-flash-mla.yml
+  build-fast-hadamard-transform.yml
   build-all.yml           # builds every component x every matrix combo
   release.yml             # on `v*` tag push: full-matrix build + upload
   publish-index.yml       # (re)publishes the GitHub Pages PEP 503 index
@@ -202,8 +205,9 @@ in from `${{ github.repository }}`, so no other change is needed.
 
 - **Every package is available for arm64, but not every component has an
   arm64 job.** The `build_matrix` covers `x86_64` and `aarch64`, and
-  `flash-attention`, `apex`, `TransformerEngine`, `flashinfer`, `deep-ep` and
-  `flash-mla` all build both. `Megatron-Bridge` deliberately stays `arches: [x86_64]`: its wheel is
+  `flash-attention`, `apex`, `TransformerEngine`, `flashinfer`, `deep-ep`,
+  `flash-mla` and `fast-hadamard-transform` all build both.
+  `Megatron-Bridge` deliberately stays `arches: [x86_64]`: its wheel is
   `py3-none-any`, so the single x86_64 build already installs on arm64, and a
   second job would only race a byte-identical asset name onto the same
   release. `flashinfer` is a hybrid for the same reason - two of its three
@@ -271,6 +275,13 @@ in from `${{ github.repository }}`, so no other change is needed.
   after the build. Their wheels are therefore plain `deep-ep 1.2.1` /
   `flash-mla 1.0.0`, and - as with `apex` - the exact commit lives in the
   release tag and title rather than in the version.
+- **`fast-hadamard-transform` ignores `torch_cuda_arch_list`.** Its `setup.py`
+  derives gencode flags from the *toolkit* version alone, emitting nine of them
+  on CUDA 13 (`sm_75` through `sm_121`) with no env var to narrow the list -
+  which is both why it is slow enough to belong here (verl's image used to
+  compile all nine on every build) and why its wheel covers more parts than any
+  other component's. `versions.yaml` therefore sets `torch_cuda_arch_list: null`
+  for it, as it does for `flash-mla`.
 - **`apex` tracks `master`** (both verl Dockerfiles build it unpinned), so it
   effectively behaves like a rolling release under the fixed tag
   `apex-master`; every other component tracks a specific tag and gets a fresh

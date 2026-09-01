@@ -93,9 +93,10 @@ machine here is x86_64, so a self-hosted arm64 row would queue forever.
 much lower `max_jobs` on the arm row (4 vCPU) and several resumed attempts
 for the heavy builds.
 
-`flash-attention`, `apex`, `transformer-engine` and `flashinfer` build both
-arches; `megatron-bridge` is x86_64-only because its `py3-none-any` wheel
-already covers arm64.
+`flash-attention`, `apex`, `transformer-engine`, `flashinfer`, `deep-ep`,
+`flash-mla` and `fast-hadamard-transform` build both arches;
+`megatron-bridge` is x86_64-only because its `py3-none-any` wheel already
+covers arm64.
 
 Each arch is a separate job. To build just one, dispatch
 `build-<component>.yml` with its `arch` input (or pass
@@ -113,8 +114,9 @@ every arch. When adding a new arch to `build_matrix`, extend the static
   `arch_list_strip_dots` (e.g. `80;90;120`).
 - flashinfer: given verbatim with PTX-family suffixes (e.g.
   `8.0 9.0a 12.0f`) since those can't be derived mechanically.
-- Megatron-Bridge: set to `null` - the same goes for any component that
-  builds no CUDA code or hardcodes its own gencode flags.
+- Megatron-Bridge, flash-mla, fast-hadamard-transform: set to `null` - the
+  same goes for any component that builds no CUDA code, or that derives /
+  hardcodes its own gencode flags instead of reading the variable.
 
 ## Release naming
 
