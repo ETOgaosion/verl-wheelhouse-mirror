@@ -270,11 +270,15 @@ components:
     builder: deep_ep
     # setup.py's distribution name is deep_ep, which normalizes to deep-ep.
     wheel_packages: [deep-ep]
-    # DeepEP is Hopper-and-newer only, so this is the same pair verl's own image
-    # builds rather than the wider x86_64 list the other components carry. Note
-    # setup.py disables its aggressive PTX LD/ST tricks for anything but a bare
-    # "9.0" - adding 10.0 is what verl's image already does.
-    torch_cuda_arch_list: "9.0;10.0"
+    # x86_64 includes Ampere (A100, 8.0) plus Hopper/Blackwell. Upstream
+    # setup.py cannot fat-bin those: DISABLE_SM90_FEATURES=1 is global and
+    # also drops NVSHMEM. ci/patches/enable_deep_ep_sm80.py rewrites the
+    # checkout at build time so sm_80 takes the existing Ampere intranode
+    # paths while 9.0/10.0 keep TMA, cluster launch and NVSHMEM. Internode
+    # / low-latency stay Hopper+ (A100 is intranode-only, matching
+    # upstream). setup.py disables its aggressive PTX LD/ST tricks for
+    # anything but a bare "9.0".
+    torch_cuda_arch_list: "8.0;9.0;10.0"
     requires_cudnn: false
     # Eight translation units, but -rdc=true device linking makes the tail of
     # the build memory-hungry; 2 is what a 4 vCPU / 16 GB runner (plus the 10 GB
@@ -282,11 +286,12 @@ components:
     max_jobs: 2
     runs_on: ubuntu-24.04
     # No `arches` filter: arm64 is the arch that benefits most (a GB200/GH200
-    # image otherwise compiles this under QEMU), and the arch list above is
-    # already the server-class pair, so the arm row only needs its own runner.
+    # image otherwise compiles this under QEMU). 8.0 is x86-attached A100,
+    # so the arm row keeps the server-class pair and only swaps the runner.
     arch_overrides:
       aarch64:
         runs_on: ubuntu-24.04-arm
+        torch_cuda_arch_list: "9.0;10.0"
     extra_env:
       # Must match docker/Dockerfile.uv.cu130's NVSHMEM_VERSION arg: the wheel
       # bakes an rpath to this NVSHMEM install into deep_ep_cpp.so, so the image

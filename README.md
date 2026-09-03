@@ -51,6 +51,8 @@ ci/
     deep_ep.sh
     flash_mla.sh
     fast_hadamard_transform.sh
+  patches/
+    enable_deep_ep_sm80.py  # fat-bin Ampere+Hopper for deep-ep
 .github/workflows/
   _build.yml              # reusable single-combination build workflow
   _ensure_release.yml     # reusable: create/update a component's release
@@ -261,7 +263,13 @@ in from `${{ github.repository }}`, so no other change is needed.
   `timeout-minutes` cap so a stalled upload fails within the hour instead of
   sitting on the runner until the job times out.
 - **The DeepSeek kernels carry two constraints the other components don't.**
-  `deep-ep` links NVSHMEM and bakes `-Wl,-rpath,$NVSHMEM_DIR/lib` into its
+  `deep-ep`'s x86_64 wheel also ships an Ampere (`8.0`, A100) cubin for the
+  intranode kernels; internode / low-latency / NVSHMEM stay Hopper-and-newer,
+  matching upstream. Ampere is compiled in via a build-time rewrite
+  (`ci/patches/enable_deep_ep_sm80.py`) because DeepEP's own
+  `DISABLE_SM90_FEATURES` flag cannot fat-bin both. The aarch64 wheel stays
+  `9.0;10.0`. Separately, `deep-ep` links NVSHMEM and bakes
+  `-Wl,-rpath,$NVSHMEM_DIR/lib` into its
   extension, so its wheel only resolves libnvshmem where that directory exists:
   `common.sh`'s `install_nvshmem` therefore installs
   `nvidia-nvshmem-cu<major>==<extra_env NVSHMEM_VERSION>` into

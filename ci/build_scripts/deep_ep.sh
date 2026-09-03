@@ -2,8 +2,9 @@
 # Builds the deep-ep (DeepEP) wheel with the toolchain verl's
 # docker/Dockerfile.uv.cu130 sets up for its own source build of the same
 # pinned commit - system NVSHMEM at that image's absolute path, CCCL headers on
-# CPATH, a Hopper+Blackwell arch list - swapping the in-place `uv sync` build
-# for `pip wheel --no-deps -w dist` so a distributable artifact is produced.
+# CPATH, an Ampere+Hopper+Blackwell arch list on x86_64 - swapping the in-place
+# `uv sync` build for `pip wheel --no-deps -w dist` so a distributable artifact
+# is produced.
 # Run with CWD = the DeepEP submodule checkout.
 #
 # Caveat carried over from that source build: setup.py's second extension
@@ -43,6 +44,18 @@ install_nvshmem
 # already the default; setting it explicitly keeps the assert from firing if a
 # future ref changes the default.
 export DISABLE_AGGRESSIVE_PTX_INSTRS=1
+
+# Upstream cannot fat-bin Ampere with Hopper: DISABLE_SM90_FEATURES is a
+# process-global compile flag and also asserts NVSHMEM is off. When the
+# arch list includes 8.0, rewrite the checkout so sm_80 uses the existing
+# Ampere intranode paths and host launch dispatches on the runtime SM
+# version. Internode / low-latency stay Hopper-only. aarch64 does not
+# include 8.0 (no A100), so this is a no-op there.
+case ";${TORCH_CUDA_ARCH_LIST};" in
+  *";8.0;"*)
+    python3 "${SCRIPT_DIR}/../patches/enable_deep_ep_sm80.py"
+    ;;
+esac
 
 # The hybrid_ep extension links -lnvtx3interop and -lcuda. Both come from the
 # toolkit _build.yml installs: libnvtx3interop.so from its nvtx sub-package
