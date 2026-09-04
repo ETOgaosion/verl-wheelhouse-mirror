@@ -64,6 +64,15 @@ on:
         required: false
         type: string
         default: ""
+      verify-wheel-archs:
+        description: >-
+          "true" to fail the build before upload when the produced wheels'
+          fatbin does not cover every arch in torch-cuda-arch-list (sm_80
+          cubin silently missing, etc.). Components that rehost prebuilt
+          wheels or declare no arch list pass "false".
+        required: false
+        type: string
+        default: "true"
       requires-cudnn:
         required: false
         type: string
@@ -385,6 +394,21 @@ jobs:
         if: steps.build_wheel.outputs.exit_code != '0' && !contains(fromJSON('["124", "137", "143"]'), steps.build_wheel.outputs.exit_code)
         run: exit ${{ steps.build_wheel.outputs.exit_code }}
 
+      - name: Verify wheel CUDA arch coverage
+        # Gate the upload on the wheels actually fat-binning the requested SM
+        # arches: an arch list entry that nvcc silently dropped, or - for
+        # deep-ep - an sm_80 cubin that never materialized because the sm80
+        # patch did not apply, must fail here instead of shipping a wheel
+        # skip detection would then trust. cuobjdump from the installed CUDA
+        # toolkit is used when present; ci/cuda_archs.py otherwise parses the
+        # .nv_fatbin ELF sections directly. Components with no arch list
+        # (pure-Python / hardcoded gencodes) or rehosted prebuilt wheels
+        # (verify-wheel-archs: "false") skip this.
+        if: inputs.verify-wheel-archs == 'true' && inputs.torch-cuda-arch-list != ''
+        run: |
+          python3 ci/cuda_archs.py "${{ inputs.path }}"/dist/*.whl \
+            --require "${{ inputs.torch-cuda-arch-list }}"
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         timeout-minutes: 30
@@ -413,19 +437,26 @@ jobs:
           python3 ci/release_meta.py --component "${{ inputs.component }}" > release-meta.json
           TAG=$(python3 -c "import json; print(json.load(open('release-meta.json'))[0]['tag'])")
           TITLE=$(python3 -c "import json; print(json.load(open('release-meta.json'))[0]['title'])")
-          NOTES=$(python3 -c "import json; print(json.load(open('release-meta.json'))[0]['notes'])")
+          MANIFEST=$(python3 -c "import json; print(json.load(open('release-meta.json'))[0]['manifest_asset'])")
+          python3 -c "import json; from pathlib import Path; Path('release-notes.md').write_text(json.load(open('release-meta.json'))[0]['notes'], encoding='utf-8')"
+          # Machine-readable build snapshot (versions, arch list, builder
+          # command, env, sha256 of _build.yml/common.sh/builder/patches):
+          # uploaded as a release asset so push-time skip detection downloads
+          # and diffs it instead of trusting an opaque title string.
+          python3 -c "import json; from pathlib import Path; meta=json.load(open('release-meta.json'))[0]; Path(meta['manifest_asset']).write_text(json.dumps(meta['manifest'], indent=2, sort_keys=True) + '\n', encoding='utf-8')"
           if [ "$TAG" != "${{ inputs.release-version }}" ]; then
             echo "::error::release_meta tag ($TAG) does not match release-version (${{ inputs.release-version }})" >&2
             exit 1
           fi
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release edit "$TAG" --repo "${{ github.repository }}" --title "$TITLE"
+            gh release edit "$TAG" --repo "${{ github.repository }}" --title "$TITLE" --notes-file release-notes.md
           else
             gh release create "$TAG" \
               --repo "${{ github.repository }}" \
               --title "$TITLE" \
-              --notes "$NOTES"
+              --notes-file release-notes.md
           fi
+          gh release upload "$TAG" "$MANIFEST" --repo "${{ github.repository }}" --clobber
 
       - name: Upload wheel(s) to release ${{ inputs.release-version }}
         if: inputs.upload-to-release

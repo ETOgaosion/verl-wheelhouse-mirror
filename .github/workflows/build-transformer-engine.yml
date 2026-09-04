@@ -75,6 +75,7 @@ jobs:
       torch-audio-version: ${{ matrix.torch_audio }}
       cxx11-abi: ${{ matrix.cxx11_abi }}
       torch-cuda-arch-list: ${{ matrix.torch_cuda_arch_list }}
+      verify-wheel-archs: ${{ matrix.verify_wheel_archs }}
       requires-cudnn: ${{ matrix.requires_cudnn }}
       max-jobs: ${{ matrix.max_jobs }}
       extra-env: ${{ matrix.extra_env }}

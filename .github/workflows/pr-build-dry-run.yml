@@ -1,0 +1,79 @@
+name: Build plan dry run
+
+# PR check: show which component/arch rows the next push would rebuild and
+# which it would skip (with the reason), without building anything. A human
+# judges whether the plan matches the change's intent. Wheels are not
+# downloaded here (--no-verify-wheels); fatbin coverage is still re-verified
+# at push time and gated before upload in _build.yml.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - versions.yaml
+      - "ci/**"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: build-plan-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compute build/skip plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pip install -q pyyaml
+          # GITHUB_REPOSITORY is the base repo even for fork PRs, so releases
+          # are always compared against the canonical verl-project repo.
+          python3 ci/generate_matrix.py \
+            --skip-existing-releases \
+            --repo "${GITHUB_REPOSITORY}" \
+            --no-verify-wheels \
+            --report build-plan.md
+          {
+            echo
+            cat build-plan.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post build plan on the pull request
+        # Fork PRs run with a read-only token and no secrets; the plan is
+        # still visible in the job summary above, just not commented.
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          {
+            echo "<!-- wheelhouse-build-plan -->"
+            echo
+            cat build-plan.md
+          } > comment-body.md
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --paginate \
+            --jq '[.[] | select(.body | contains("wheelhouse-build-plan"))] | last | .id // empty')
+          if [ -n "${existing}" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" \
+              -f body=@comment-body.md >/dev/null
+          else
+            gh pr comment "${PR_NUMBER}" --body-file comment-body.md
+          fi
