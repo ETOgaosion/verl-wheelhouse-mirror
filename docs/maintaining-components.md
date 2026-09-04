@@ -284,6 +284,24 @@ python3 ci/cuda_archs.py dist/*.whl                      # report found arches
 python3 ci/cuda_archs.py dist/*.whl --require "8.0;9.0;10.0"  # exit 1 if any is missing
 ```
 
+## Previewing the build plan on a pull request
+
+Every PR that touches `versions.yaml`, `ci/`, or the workflows runs the
+**Build plan dry run** check (`.github/workflows/pr-build-dry-run.yml`): it
+compares the PR's matrix against the live releases and posts a markdown table
+to the PR (and the job summary) showing, per component/arch row, whether the
+next push would **build** or **skip** and why. Nothing is built or published
+- the output is for a human to judge, e.g. a ref bump should show builds for
+that component only, while a docs-only change should show all skips. The dry
+run does not download wheels (`--no-verify-wheels`, wheels can be multi-GB);
+fatbin coverage stays gated at build time and re-verified at push time. Run
+it locally:
+
+```bash
+python3 ci/generate_matrix.py --skip-existing-releases \
+  --repo verl-project/verl-wheelhouse --no-verify-wheels --report build-plan.md
+```
+
 ## See also
 
 - [`README.md`](../README.md) for the full pipeline architecture and how to

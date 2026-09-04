@@ -11,8 +11,19 @@ from test_cuda_archs import fatbin_elf, make_wheel
 
 
 def make_versions(component):
-    return {"build_matrix": [{"cuda": "13.0.2", "python": "3.12", "torch": "2.11.0"}],
-            "components": {"demo": component}}
+    return {
+        "build_matrix": [
+            {
+                "cuda": "13.0.2",
+                "python": "3.12",
+                "torch": "2.11.0",
+                "torch_vision": "0.26.0",
+                "torch_audio": "2.11.0",
+                "cxx11_abi": "TRUE",
+            }
+        ],
+        "components": {"demo": component},
+    }
 
 
 def make_release(versions, assets):
@@ -292,6 +303,91 @@ class BuildConfigManifestTests(unittest.TestCase):
             )
         self.assertFalse(covered)
         self.assertIn("no stored build config", reason)
+
+
+class DryRunReportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._fp_patch = patch(
+            "generate_matrix.build_input_fingerprint", return_value=STUB_FINGERPRINT
+        )
+        self._cuobjdump_patch = patch("cuda_archs.find_cuobjdump", return_value=None)
+        self._fp_patch.start()
+        self._cuobjdump_patch.start()
+        self.addCleanup(self._fp_patch.stop)
+        self.addCleanup(self._cuobjdump_patch.stop)
+
+        self.component_cfg = {
+            "ref": "v1.2.3",
+            "path": "demo",
+            "builder": "demo",
+            "wheel_packages": ["demo"],
+            "torch_cuda_arch_list": "8.0;9.0;10.0",
+            "max_jobs": 4,
+            "runs_on": ["self-hosted", "Linux", "X64"],
+        }
+        self.versions = make_versions(dict(self.component_cfg))
+        # A second component whose release does not exist yet.
+        self.versions["components"]["ghost"] = dict(self.component_cfg, ref="v9.9.9")
+        self.entries = generate_matrix.build_full_matrix(
+            self.versions, ["demo", "ghost"]
+        )
+
+    def test_dry_run_covers_without_downloading_wheels(self) -> None:
+        release = make_release(self.versions, [DEMO_WHEELS[0]])
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("dry-run must not download release wheels")
+
+        combo = generate_matrix.component_combos(self.versions, "demo")[0]
+        with patch("generate_matrix.download_release_asset", side_effect=boom):
+            covered, reason = generate_matrix.release_covers_combo(
+                self.versions,
+                "demo",
+                combo,
+                release,
+                repo="owner/repo",
+                verify_wheels=False,
+            )
+        self.assertTrue(covered, reason)
+        self.assertIn("dry-run mode", reason)
+
+    @patch("generate_matrix.inspect_release")
+    def test_report_lists_build_and_skip_decisions_with_reasons(
+        self, inspect_release
+    ) -> None:
+        covered_release = make_release(self.versions, [DEMO_WHEELS[0]])
+
+        def fake_inspect(_repo, tag):
+            return None if tag.startswith("ghost-") else covered_release
+
+        inspect_release.side_effect = fake_inspect
+        decisions = generate_matrix.evaluate_matrix_rows(
+            self.versions, self.entries, "owner/repo", verify_wheels=False
+        )
+        by_component = {d["entry"]["component"]: d for d in decisions}
+        self.assertEqual(by_component["demo"]["decision"], "skip")
+        self.assertEqual(by_component["ghost"]["decision"], "build")
+        self.assertIn("would be created", by_component["ghost"]["reason"])
+
+        report = generate_matrix.format_dry_run_report(decisions, "owner/repo")
+        self.assertIn("1 row(s) would build, 1 row(s) would be skipped", report)
+        self.assertIn("`demo`", report)
+        self.assertIn("`ghost`", report)
+        self.assertIn(":hammer: build", report)
+        self.assertIn(":fast_forward: skip", report)
+        self.assertIn("dry run", report)
+
+    @patch("generate_matrix.inspect_release", return_value=None)
+    def test_missing_release_is_a_build_decision(self, inspect_release) -> None:
+        decisions = generate_matrix.evaluate_matrix_rows(
+            self.versions,
+            self.entries,
+            "owner/repo",
+            verify_wheels=False,
+        )
+        self.assertTrue(all(d["decision"] == "build" for d in decisions))
+        self.assertEqual(2, len(decisions))
+        inspect_release.assert_called()
 
 
 if __name__ == "__main__":

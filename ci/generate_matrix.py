@@ -583,9 +583,15 @@ def release_covers_combo(
     combo: Dict[str, Any],
     release: Dict[str, Any],
     repo: Optional[str] = None,
+    verify_wheels: bool = True,
 ) -> Tuple[bool, str]:
     """Skip one matrix row only when title, stored build config, wheels, and
-    the wheels' actual fatbin SM-arch coverage all match."""
+    the wheels' actual fatbin SM-arch coverage all match.
+
+    `verify_wheels=False` skips the (multi-GB) release-wheel download and
+    fatbin inspection - used by the PR dry-run report, where the decision is
+    shown to a human and the real re-verification still runs at push time.
+    """
     cfg = get_component(versions, component)
     ref = str(cfg["ref"])
     expected_title = release_title(ref, component, component_combos(versions, component))
@@ -623,6 +629,11 @@ def release_covers_combo(
         return False, f"missing wheel package(s): {formatted}"
 
     effective_cfg = _merged_component_fields(versions, component, arch)
+    if not verify_wheels:
+        return True, (
+            "exact title, matching build config, and expected wheel packages are present "
+            "(wheel fatbin re-verification deferred: dry-run mode)"
+        )
     if effective_cfg.get("verify_wheel_archs", True):
         required_packages = {normalize_package_name(str(name)) for name in configured_packages}
         covered, reason = verify_release_wheel_archs(
@@ -652,11 +663,14 @@ def release_covers_component(
     component: str,
     release: Dict[str, Any],
     repo: Optional[str] = None,
+    verify_wheels: bool = True,
 ) -> Tuple[bool, str]:
     """Check that every matrix row for a component is covered by the release."""
     last_reason = "exact title, matching build config, and all expected wheel packages are present"
     for combo in component_combos(versions, component):
-        covered, reason = release_covers_combo(versions, component, combo, release, repo)
+        covered, reason = release_covers_combo(
+            versions, component, combo, release, repo, verify_wheels=verify_wheels
+        )
         if not covered:
             return False, reason
         last_reason = reason
@@ -736,31 +750,108 @@ def combo_for_matrix_entry(
     )
 
 
-def rows_needing_build(
-    versions: Dict[str, Any], entries: List[Dict[str, Any]], repo: str
+def evaluate_matrix_rows(
+    versions: Dict[str, Any],
+    entries: List[Dict[str, Any]],
+    repo: str,
+    verify_wheels: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Keep only matrix rows whose wheel build config is not already on the release."""
-    needed = []
+    """Decide build vs skip for every matrix row, with the reason why.
+
+    Returns one record per input row: {"entry", "decision": "build"|"skip",
+    "reason"}. Each component's release is inspected at most once. Fail-closed:
+    a release that is missing/unreadable, a missing/stale build manifest, a
+    missing wheel, or a fatbin-coverage mismatch all decide "build".
+    """
+    decisions = []
     releases: Dict[str, Optional[Dict[str, Any]]] = {}
     for entry in entries:
         component = str(entry["component"])
         tag = str(entry["release_tag"])
+        label = f"{component} ({entry['arch']})"
         if component not in releases:
             releases[component] = inspect_release(repo, tag)
         release = releases[component]
         if release is None:
-            needed.append(entry)
+            reason = "release not found or unreadable; it would be created"
+            print(f"Keeping {label}: {reason}.", file=sys.stderr)
+            decisions.append({"entry": entry, "decision": "build", "reason": reason})
             continue
 
         combo = combo_for_matrix_entry(versions, entry)
-        covered, reason = release_covers_combo(versions, component, combo, release, repo)
-        label = f"{component} ({entry['arch']})"
+        covered, reason = release_covers_combo(
+            versions, component, combo, release, repo, verify_wheels=verify_wheels
+        )
         if covered:
             print(f"Skipping {label}: release {tag!r} {reason}.", file=sys.stderr)
+            decisions.append({"entry": entry, "decision": "skip", "reason": reason})
         else:
             print(f"Keeping {label}: release {tag!r} has {reason}.", file=sys.stderr)
-            needed.append(entry)
-    return needed
+            decisions.append({"entry": entry, "decision": "build", "reason": reason})
+    return decisions
+
+
+def rows_needing_build(
+    versions: Dict[str, Any],
+    entries: List[Dict[str, Any]],
+    repo: str,
+    verify_wheels: bool = True,
+) -> List[Dict[str, Any]]:
+    """Keep only matrix rows whose wheel build config is not already on the release."""
+    decisions = evaluate_matrix_rows(
+        versions, entries, repo, verify_wheels=verify_wheels
+    )
+    return [d["entry"] for d in decisions if d["decision"] == "build"]
+
+
+def format_dry_run_report(decisions: List[Dict[str, Any]], repo: str) -> str:
+    """Markdown build/skip preview for PRs: no builds run, a human judges it."""
+    builds = [d for d in decisions if d["decision"] == "build"]
+    skips = [d for d in decisions if d["decision"] == "skip"]
+    lines = [
+        "## Wheelhouse build plan (dry run)",
+        "",
+        (
+            f"Compared the `versions.yaml` in this change against the releases on "
+            f"`{repo}`. Nothing is built or published from this check - it only "
+            "shows which matrix rows the next push would rebuild and which it "
+            "would skip, so a human can confirm the plan matches the intent of "
+            "the change."
+        ),
+        "",
+        f"**{len(builds)} row(s) would build, {len(skips)} row(s) would be skipped.**",
+        "",
+        "| Component | Ref | Arch | CUDA | Python | Torch | Decision | Reason |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for d in decisions:
+        entry = d["entry"]
+        decision = ":hammer: build" if d["decision"] == "build" else ":fast_forward: skip"
+        reason = str(d["reason"]).replace("|", "\\|")
+        lines.append(
+            f"| `{entry['component']}` | `{entry['ref']}` | `{entry['arch']}` "
+            f"| {entry['cuda']} | {entry['python']} | {entry['torch']} "
+            f"| {decision} | {reason} |"
+        )
+    lines.extend(
+        [
+            "",
+            (
+                "<sub>Each row is decided from the release title, the "
+                "`wheelhouse-build-manifest.json` release asset (dependency "
+                "versions, CUDA arch list, extra env, builder command, "
+                "`max_jobs`, `runs_on`, and sha256 fingerprints of "
+                "`_build.yml`, the builder script, `common.sh` and declared "
+                "patches), and wheel package presence. This dry run does not "
+                "download wheels; the published wheels' fatbin SM-arch "
+                "coverage is re-verified at push time and gated before "
+                "upload. Anything that cannot be verified fails closed "
+                "towards a rebuild.</sub>"
+            ),
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def component_names(versions: Dict[str, Any]) -> List[str]:
@@ -803,8 +894,8 @@ def build_matrix_entries(versions: Dict[str, Any], component: str) -> List[Dict[
                 "cuda": str(combo["cuda"]),
                 "python": str(combo["python"]),
                 "torch": str(combo["torch"]),
-                "torch_vision": str(combo["torch_vision"]),
-                "torch_audio": str(combo["torch_audio"]),
+                "torch_vision": str(combo.get("torch_vision") or ""),
+                "torch_audio": str(combo.get("torch_audio") or ""),
                 "cxx11_abi": str(combo["cxx11_abi"]),
                 "torch_cuda_arch_list": cfg.get("torch_cuda_arch_list") or "",
                 # Whether _build.yml should gate the upload on the produced
@@ -871,6 +962,26 @@ def main() -> None:
         default=os.environ.get("GITHUB_REPOSITORY"),
         help="GitHub owner/repo used with --skip-existing-releases (defaults to $GITHUB_REPOSITORY).",
     )
+    parser.add_argument(
+        "--no-verify-wheels",
+        action="store_true",
+        help=(
+            "Do not download release wheels to re-verify their fatbin SM-arch "
+            "coverage; decide from the release title, build-manifest asset and "
+            "wheel filenames only. Used by the PR dry-run report to stay cheap "
+            "(wheels can be multi-GB); the real re-verification runs at push time."
+        ),
+    )
+    parser.add_argument(
+        "--report",
+        metavar="PATH",
+        help=(
+            "Dry-run mode: write a markdown build/skip report for every matrix "
+            "row (with the reason) to PATH and exit 0 without printing the JSON "
+            "matrix. Intended for PR CI, where a human judges whether the plan "
+            "matches the change. Requires --repo or $GITHUB_REPOSITORY."
+        ),
+    )
     args = parser.parse_args()
 
     versions = load_versions()
@@ -897,10 +1008,26 @@ def main() -> None:
         # rather than fail on an empty matrix.
         matrix = [entry for entry in matrix if entry["arch"] == args.arch]
 
+    if args.report:
+        if not args.repo:
+            parser.error("--report requires --repo or $GITHUB_REPOSITORY")
+        decisions = evaluate_matrix_rows(
+            versions,
+            matrix,
+            args.repo,
+            verify_wheels=not args.no_verify_wheels,
+        )
+        Path(args.report).write_text(
+            format_dry_run_report(decisions, args.repo), encoding="utf-8"
+        )
+        return
+
     if args.skip_existing_releases:
         if not args.repo:
             parser.error("--skip-existing-releases requires --repo or $GITHUB_REPOSITORY")
-        matrix = rows_needing_build(versions, matrix, args.repo)
+        matrix = rows_needing_build(
+            versions, matrix, args.repo, verify_wheels=not args.no_verify_wheels
+        )
 
     payload = json.dumps(matrix)
     print(payload)
