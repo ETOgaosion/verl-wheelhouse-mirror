@@ -9,16 +9,24 @@ invocation.
 
 The wheelhouse wants one x86_64 wheel, so this script (applied by
 ci/build_scripts/deep_ep.sh against the pinned DeepEP checkout, never
-committed into the submodule) does three local edits:
+committed into the submodule) does four local edits:
 
 1. Device-side SM90 features follow __CUDA_ARCH__ instead of a global
    -DDISABLE_SM90_FEATURES. Ampere compilation of intranode.cu then takes
    the existing #else Ampere paths; Hopper/Blackwell compilation is
    unchanged.
-2. Host launch macros in launch.cuh pick cluster/TMA vs classic <<<>>> at
+2. configs.cuh always includes the toolkit <cuda_fp8.h>. Upstream's
+   Ampere fallback (#else of the SM90 guard) re-declares the FP8 types
+   with int/uint8_t typedefs; during the sm_80 device pass torch/nvshmem
+   headers pull in the real <cuda_fp8.h> transitively, causing
+   "invalid redeclaration of __nv_fp8_interpretation_t / __nv_fp8x4_e4m3"
+   errors. The sm_80 pass references no FP8 symbols (the only FP8 call
+   sites are in the Hopper-only sources of edit 4), so the real header
+   is harmless there; host and sm_90/sm_100 passes already used it.
+3. Host launch macros in launch.cuh pick cluster/TMA vs classic <<<>>> at
    runtime from the current device's compute capability, so the same host
    object can launch either cubin.
-3. Internode / low-latency / PCIe .cu files have no Ampere fallbacks.
+4. Internode / low-latency / PCIe .cu files have no Ampere fallbacks.
    Their device pass for sm_80 is compiled out; launching those kernels on
    A100 fails with "no kernel image", which matches upstream's
    "A100 support (intranode only)" claim.
@@ -34,15 +42,41 @@ MARKER = "DEEP_EP_SM80_FATBIN"
 
 CONFIGS_SNIPPET = f"""\
 // {MARKER}: when nvcc compiles the sm_80 gencode, take the existing Ampere
-// fallbacks (#else of #ifndef DISABLE_SM90_FEATURES) without forcing that
-// flag for the host pass or for sm_90/sm_100. Upstream setup.py cannot
-// express this because -DDISABLE_SM90_FEATURES is process-global.
+// fallbacks (#else of #ifndef DISABLE_SM90_FEATURES for TMA/cluster/elect)
+// without forcing that flag for the host pass or for sm_90/sm_100.
+// Upstream setup.py cannot express this because -DDISABLE_SM90_FEATURES is
+// process-global. The FP8 fallback typedefs are removed separately below:
+// the sm_80 pass uses the real <cuda_fp8.h> like every other pass.
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 900)
 #ifndef DISABLE_SM90_FEATURES
 #define DISABLE_SM90_FEATURES
 #endif
 #endif
 
+"""
+
+CONFIGS_FP8_OLD = """\
+#ifndef DISABLE_SM90_FEATURES
+#include <cuda_fp8.h>
+#else
+// Ampere does not support FP8 features
+#define __NV_E4M3 0
+#define __NV_E5M2 1
+typedef int __nv_fp8_interpretation_t;
+typedef int __nv_fp8x4_e4m3;
+typedef uint8_t __nv_fp8_storage_t;
+#endif
+"""
+
+CONFIGS_FP8_NEW = f"""\
+// {MARKER}: always include the toolkit FP8 header. The upstream Ampere
+// fallback re-declares these types with int/uint8_t typedefs, which collide
+// with the real <cuda_fp8.h> that torch/nvshmem headers pull in
+// transitively during the sm_80 device pass. No sm_80 compilation unit
+// references FP8 symbols (the only FP8 call sites live in the Hopper-only
+// sources whose sm_80 cubin is compiled out), so the real header is
+// harmless here and identical to the host / sm_90 / sm_100 passes.
+#include <cuda_fp8.h>
 """
 
 LAUNCH_MACROS = f"""\
@@ -154,6 +188,9 @@ def patch_configs(root: Path) -> None:
     pragma = "#pragma once\n"
     if not text.startswith(pragma):
         raise SystemExit(f"{path}: expected to start with #pragma once")
+    if CONFIGS_FP8_OLD not in text:
+        raise SystemExit(f"{path}: could not find the FP8 fallback block to replace")
+    text = text.replace(CONFIGS_FP8_OLD, CONFIGS_FP8_NEW, 1)
     _write(path, pragma + "\n" + CONFIGS_SNIPPET + text[len(pragma) :])
 
 
