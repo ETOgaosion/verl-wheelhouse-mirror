@@ -25,7 +25,10 @@ committed into the submodule) does four local edits:
    is harmless there; host and sm_90/sm_100 passes already used it.
 3. Host launch macros in launch.cuh pick cluster/TMA vs classic <<<>>> at
    runtime from the current device's compute capability, so the same host
-   object can launch either cubin.
+   object can launch either cubin. The runtime SET_SHARED_MEMORY_FOR_TMA
+   always expands to code referencing the caller's `smem_size` (upstream's
+   Ampere build #defines that macro to void()), so intranode.cu's two
+   `smem_size` constants move out from under the SM90 guard.
 4. Internode / low-latency / PCIe .cu files have no Ampere fallbacks.
    Their device pass for sm_80 is compiled out; launching those kernels on
    A100 fails with "no kernel image", which matches upstream's
@@ -77,6 +80,24 @@ CONFIGS_FP8_NEW = f"""\
 // sources whose sm_80 cubin is compiled out), so the real header is
 // harmless here and identical to the host / sm_90 / sm_100 passes.
 #include <cuda_fp8.h>
+"""
+
+# intranode.cu declares `smem_size` only under #ifndef DISABLE_SM90_FEATURES
+# (two identical sites: dispatch and combine launch wrappers). The patched
+# SET_SHARED_MEMORY_FOR_TMA expands in every pass and references that
+# variable (the cudaFuncSetAttribute call is a runtime Hopper+ check), so
+# the constant must be declared unconditionally.
+INTRANODE_SMEM_OLD = """\
+#ifndef DISABLE_SM90_FEATURES
+    constexpr int smem_size = kNumTMABytesPerWarp * (kNumThreads / 32);
+#endif
+"""
+
+INTRANODE_SMEM_NEW = f"""\
+// {MARKER}: declared unconditionally - the runtime-dispatched
+// SET_SHARED_MEMORY_FOR_TMA macro references smem_size in every compilation
+// pass; upstream's Ampere build #defines that macro to void() instead.
+    constexpr int smem_size = kNumTMABytesPerWarp * (kNumThreads / 32);
 """
 
 LAUNCH_MACROS = f"""\
@@ -194,6 +215,17 @@ def patch_configs(root: Path) -> None:
     _write(path, pragma + "\n" + CONFIGS_SNIPPET + text[len(pragma) :])
 
 
+def patch_intranode_smem(root: Path) -> None:
+    path = root / "csrc/kernels/intranode.cu"
+    text = _read(path)
+    if MARKER in text:
+        return
+    count = text.count(INTRANODE_SMEM_OLD)
+    if count != 2:
+        raise SystemExit(f"{path}: expected 2 guarded smem_size declarations, found {count}")
+    _write(path, text.replace(INTRANODE_SMEM_OLD, INTRANODE_SMEM_NEW))
+
+
 def patch_launch(root: Path) -> None:
     path = root / "csrc/kernels/launch.cuh"
     text = _read(path)
@@ -236,6 +268,7 @@ def main() -> None:
     if not (root / "setup.py").is_file() or not (root / "csrc/kernels").is_dir():
         raise SystemExit(f"{root} does not look like a DeepEP checkout (run from the submodule CWD)")
     patch_configs(root)
+    patch_intranode_smem(root)
     patch_launch(root)
     patch_is_sm90_compiled(root)
     for rel in HOPPER_ONLY_SOURCES:
