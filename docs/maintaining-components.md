@@ -40,10 +40,20 @@ other logic needs to change for routine work.
 
 5. Commit the `versions.yaml` change. Pushing to `main` automatically
    triggers that component's `build-<component>.yml` (its `paths:` filter
-   matches `versions.yaml`). If the target release already has the exact
-   configured CUDA/Python/Torch title and all expected `wheel_packages`, the
-   push skips the redundant build. Otherwise, on success, that push creates
-   (or reuses) the component's own persistent release - tag
+   matches `versions.yaml`). The push skips a matrix row only when *all* of
+   the following agree with the target release: the configured
+   CUDA/Python/Torch title; the release's `wheelhouse-build-manifest.json`
+   asset (a snapshot of every build input - dependency versions,
+   `torch_cuda_arch_list`, env vars, the builder command, `max_jobs`,
+   `runs_on`, and sha256 fingerprints of `_build.yml`, the builder script,
+   `common.sh` and any declared `patches`; a copy is also embedded in the
+   release notes as a fallback); the expected `wheel_packages` on both CPU
+   arches; and - downloaded and inspected directly - that the published
+   wheels' `.nv_fatbin` sections actually cover every SM arch
+   `torch_cuda_arch_list` promises. Anything unverifiable (download failure,
+   no manifest, old schema) fails closed and rebuilds. Otherwise, on
+   success, that push creates (or reuses) the component's own persistent
+   release - tag
    `<component>-<new-ref>`, title `<component> <new-ref> - cu.. py..
    torch..` (see `ci/release_meta.py`) - uploads the new wheel there, and
    republishes the package index, so it's `pip install`-able right away.
@@ -241,6 +251,38 @@ where needed:
 | flash-attention, TransformerEngine | undotted, e.g. `80;90;120` | `ci/build_scripts/common.sh`'s `arch_list_strip_dots` |
 | flashinfer | space-separated with PTX-family suffixes, e.g. `8.0 9.0a 12.0f` | given verbatim in `versions.yaml` (suffixes can't be derived mechanically) |
 | Megatron-Bridge (pure-Python), flash-mla (hardcodes `sm90a`/`sm100f`), fast-hadamard-transform (derives nine gencodes from the toolkit version) | n/a | set `torch_cuda_arch_list: null` for components that build no CUDA code, or that hardcode their own gencode flags |
+
+The arch list is a promise that gets verified, not just a build flag:
+
+- **Pre-upload gate.** After the build, `_build.yml` runs `ci/cuda_archs.py` over
+  `dist/*.whl` and fails the job if the wheels' `.nv_fatbin` sections don't
+  contain every declared arch (`cuobjdump` when available, a stdlib ELF
+  section scan otherwise - no runner dependency). This catches the
+  silent-drop class of failure, e.g. deep-ep's sm_80 cubin, which exists
+  only because `ci/patches/enable_deep_ep_sm80.py` rewrites the checkout at
+  build time: if that patch ever stops applying, the build fails before
+  upload rather than shipping a wheel that crashes on A100. Components
+  without an arch list (`null`) skip the gate; so does any component with
+  `verify_wheel_archs: false` (currently flashinfer, which rehosts prebuilt
+  wheels - including a ~1.2 GB data wheel - instead of compiling).
+- **Post-upload re-verification.** Push-time skip detection downloads the
+  release's wheels and re-checks the same fatbin coverage, so a wheel whose
+  declared arches were never actually fat-binned is rebuilt even though
+  `versions.yaml` still promises them.
+- **Build-input fingerprinting.** Editing anything that changes wheel
+  contents - the builder script, `common.sh`, `.github/workflows/_build.yml`,
+  or a file listed in a component's `patches:` - changes a sha256 in the
+  release manifest and forces a rebuild, without needing a version bump.
+  Declare every patch file the builder applies under `patches:` in
+  `versions.yaml` (paths are repo-root-relative and must exist), so the
+  fingerprint is complete.
+
+Inspect or gate wheels manually:
+
+```bash
+python3 ci/cuda_archs.py dist/*.whl                      # report found arches
+python3 ci/cuda_archs.py dist/*.whl --require "8.0;9.0;10.0"  # exit 1 if any is missing
+```
 
 ## See also
 

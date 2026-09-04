@@ -85,7 +85,23 @@ verl_reference_versions:
 #                  undotted "80;90;100;120" form). flashinfer's list already
 #                  includes PTX-family suffix letters ("9.0a"/"12.0f") since
 #                  those can't be derived mechanically, so it is given
-#                  verbatim.
+#                  verbatim. The list is more than a build flag: ci/cuda_archs.py
+#                  scans the built wheels' .nv_fatbin sections before upload
+#                  and re-downloads release wheels during skip detection, so a
+#                  declared arch whose cubin never materialized (e.g. deep-ep's
+#                  sm_80, which exists only via a build-time patch) fails the
+#                  build or forces a rebuild instead of shipping silently.
+# patches:         optional list of repo-root-relative files the builder
+#                  applies to its checkout (e.g. deep-ep's sm80 rewrite). They
+#                  are sha256-fingerprinted into the release manifest, so
+#                  editing one - or the builder script / common.sh - changes
+#                  the manifest and forces a rebuild even when no version pin
+#                  moved. Paths must exist or generate_matrix.py errors out.
+# verify_wheel_archs: defaults to true. Set false to skip the fatbin checks
+#                  described under torch_cuda_arch_list - for components that
+#                  rehost prebuilt wheels or ship wheels too large to download
+#                  during skip detection (flashinfer). The build-input
+#                  fingerprint still applies.
 # requires_cudnn:  whether the reusable workflow needs to apt-install cuDNN
 #                  before running the build script (only TransformerEngine
 #                  requires this - apex only optionally uses cuDNN for a
@@ -213,6 +229,11 @@ components:
     builder: flashinfer
     wheel_packages: [flashinfer-python, flashinfer-cubin, flashinfer-jit-cache]
     torch_cuda_arch_list: "8.0 9.0a 10.0a 12.0f"
+    # This row rehosts prebuilt wheels (see the arch note below) - nothing is
+    # compiled here, and flashinfer-cubin is a ~1.2 GB data wheel far over the
+    # skip-detection download cap - so opt out of fatbin arch verification
+    # (the prebuild upload gate and the release-wheel fatbin check).
+    verify_wheel_archs: false
     requires_cudnn: false
     max_jobs: 2
     runs_on: ubuntu-24.04
@@ -279,6 +300,14 @@ components:
     # upstream). setup.py disables its aggressive PTX LD/ST tricks for
     # anything but a bare "9.0".
     torch_cuda_arch_list: "8.0;9.0;10.0"
+    # Repo-root-relative files the build script applies to its checkout
+    # (deep_ep.sh runs the sm80 rewrite above whenever the arch list
+    # includes 8.0). Their sha256 goes into the release manifest's
+    # build_inputs, so editing a patch forces a rebuild instead of a
+    # stale skip, and the build's fatbin is checked against the arch
+    # list below before upload (see `verify_wheel_archs`).
+    patches:
+      - ci/patches/enable_deep_ep_sm80.py
     requires_cudnn: false
     # Eight translation units, but -rdc=true device linking makes the tail of
     # the build memory-hungry; 2 is what a 4 vCPU / 16 GB runner (plus the 10 GB

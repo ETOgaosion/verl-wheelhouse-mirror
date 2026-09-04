@@ -11,13 +11,20 @@ tag:
            (one segment per versions.yaml build_matrix entry the component is
            built for, with the x86_64 arch left implicit) e.g.
            "transformer-engine v2.16.1 - cu13.0.2 py3.12 torch2.11.0"
+    notes: human-readable pin plus a hidden JSON snapshot of each wheel's
+           build config (CUDA/Python/Torch, torch_cuda_arch_list, extra_env,
+           builder, ...). Skip detection requires that snapshot to match
+           versions.yaml exactly; title and wheel filename stay free of GPU arch.
 
 Rebuilding the same ref re-uploads (--clobber) wheels onto the same
 release; bumping a component's ref in versions.yaml starts a brand new
 release (new tag), leaving the previous one attached to the old ref as a
-historical record. This module reuses generate_matrix.py's
-load_versions/release_tag helpers so the tag computed here always matches
-the "release_tag" field _build.yml is given for that component's rows.
+historical record. Release notes include a hidden JSON snapshot of each
+wheel's build config (CUDA arch list, extra_env, builder, ...) so skip
+detection can rebuild when those change without putting them in the title.
+This module reuses generate_matrix.py's load_versions/release_tag helpers
+so the tag computed here always matches the "release_tag" field _build.yml
+is given for that component's rows.
 
 Usage:
     python ci/release_meta.py --component apex
@@ -33,8 +40,11 @@ import os
 from typing import Any, Dict, List
 
 from generate_matrix import (
+    BUILD_MANIFEST_FILENAME,
+    component_build_manifest,
     component_combos,
     component_names,
+    format_release_notes,
     get_component,
     load_versions,
     release_tag,
@@ -42,14 +52,7 @@ from generate_matrix import (
 )
 
 
-def release_notes(component: str, ref: str) -> str:
-    return (
-        f"Prebuilt CUDA wheel(s) for {component}, pinned to `{ref}`. "
-        "See versions.yaml at this ref for the exact dependency versions."
-    )
-
-
-def component_release_meta(versions: Dict[str, Any], component: str) -> Dict[str, str]:
+def component_release_meta(versions: Dict[str, Any], component: str) -> Dict[str, Any]:
     cfg = get_component(versions, component)
     ref = str(cfg["ref"])
     return {
@@ -57,11 +60,16 @@ def component_release_meta(versions: Dict[str, Any], component: str) -> Dict[str
         "ref": ref,
         "tag": release_tag(component, ref),
         "title": release_title(ref, component, component_combos(versions, component)),
-        "notes": release_notes(component, ref),
+        "notes": format_release_notes(versions, component),
+        # Machine-readable build snapshot uploaded as a release asset
+        # (BUILD_MANIFEST_FILENAME); the notes above embed the same JSON as a
+        # fallback for older skip-detection code.
+        "manifest": component_build_manifest(versions, component),
+        "manifest_asset": BUILD_MANIFEST_FILENAME,
     }
 
 
-def all_release_meta(versions: Dict[str, Any], components: List[str]) -> List[Dict[str, str]]:
+def all_release_meta(versions: Dict[str, Any], components: List[str]) -> List[Dict[str, Any]]:
     return [component_release_meta(versions, name) for name in components]
 
 
