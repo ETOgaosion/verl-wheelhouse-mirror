@@ -352,7 +352,9 @@ components:
     # / low-latency stay Hopper+ (A100 is intranode-only, matching
     # upstream). setup.py disables its aggressive PTX LD/ST tricks for
     # anything but a bare "9.0".
-    torch_cuda_arch_list: "8.0;9.0;10.0"
+    # sm_89 (L20, Ada) is added here for this build branch: the sm80
+    # rewrite's __CUDA_ARCH__ < 900 guards cover 8.9 unchanged.
+    torch_cuda_arch_list: "8.0;8.9;9.0;10.0"
     # Repo-root-relative files the build script applies to its checkout
     # (deep_ep.sh runs the sm80 rewrite above whenever the arch list
     # includes 8.0). Their sha256 goes into the release manifest's
@@ -367,9 +369,14 @@ components:
     # swap file _build.yml adds) sustains without OOM-killing nvcc.
     max_jobs: 2
     runs_on: ubuntu-24.04
-    # No `arches` filter: arm64 is the arch that benefits most (a GB200/GH200
-    # image otherwise compiles this under QEMU). 8.0 is x86-attached A100,
-    # so the arm row keeps the server-class pair and only swaps the runner.
+    # BUILD-BRANCH ONLY: converge this dispatch to a single x86_64 / cp312
+    # wheel (the L20 target); do not carry these filters to main.
+    arches: [x86_64]
+    python_versions: ["3.12"]
+    # No `arches` filter on main: arm64 is the arch that benefits most (a
+    # GB200/GH200 image otherwise compiles this under QEMU). 8.0 is
+    # x86-attached A100, so the arm row keeps the server-class pair and
+    # only swaps the runner.
     arch_overrides:
       aarch64:
         runs_on: ubuntu-24.04-arm

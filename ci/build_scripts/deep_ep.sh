@@ -51,17 +51,26 @@ install_nvshmem
 # future ref changes the default.
 export DISABLE_AGGRESSIVE_PTX_INSTRS=1
 
-# Upstream cannot fat-bin Ampere with Hopper: DISABLE_SM90_FEATURES is a
-# process-global compile flag and also asserts NVSHMEM is off. When the
-# arch list includes 8.0, rewrite the checkout so sm_80 uses the existing
-# Ampere intranode paths and host launch dispatches on the runtime SM
-# version. Internode / low-latency stay Hopper-only. aarch64 does not
-# include 8.0 (no A100), so this is a no-op there.
-case ";${TORCH_CUDA_ARCH_LIST};" in
-  *";8.0;"*)
+# Upstream cannot fat-bin pre-Hopper arches with Hopper: DISABLE_SM90_FEATURES
+# is a process-global compile flag and also asserts NVSHMEM is off. When the
+# arch list includes any SM older than 9.0 (8.0 A100, 8.6/8.9 Ada), rewrite
+# the checkout so those passes use the existing Ampere intranode paths and
+# host launch dispatches on the runtime SM version, while 9.0/10.0 keep
+# TMA, cluster launch and NVSHMEM. Internode / low-latency stay Hopper-only
+# (pre-Hopper parts are intranode-only, matching upstream). The patch keys
+# its device guards on __CUDA_ARCH__ < 900, so one rewrite covers every
+# pre-Hopper token. aarch64 does not include such an arch, so this is a
+# no-op there.
+if python3 - "${SCRIPT_DIR}" <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], ".."))
+from cuda_archs import parse_arch_list
+tokens = parse_arch_list(os.environ.get("TORCH_CUDA_ARCH_LIST", ""))
+sys.exit(0 if any(int(t.split(".", 1)[0]) < 9 for t in tokens) else 1)
+PY
+then
     python3 "${SCRIPT_DIR}/../patches/enable_deep_ep_sm80.py"
-    ;;
-esac
+fi
 
 # The hybrid_ep extension links -lnvtx3interop and -lcuda. Both come from the
 # toolkit _build.yml installs: libnvtx3interop.so from its nvtx sub-package
