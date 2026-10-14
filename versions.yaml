@@ -46,6 +46,58 @@
 #       so an x86_64 and an aarch64 wheel coexist on the same release and pip
 #       picks the right one. Omitting the field means "x86_64".
 build_matrix:
+  # ---- CUDA 13.2 (current). torch 2.13.0 publishes official +cu132 wheels for
+  # torch/torchvision on both arches and cp311/cp312, so every native kernel
+  # verl consumes builds here. The first row also selects the world /simple/
+  # aliases (see ci/build_index.py default_world), so it must stay a 13.2 row.
+  - arch: x86_64
+    cuda: "13.2.2"
+    python: "3.11"
+    torch: "2.13.0"
+    torch_vision: "0.28.0"
+    torch_audio: "2.11.0"
+    cxx11_abi: "TRUE"
+
+  - arch: x86_64
+    cuda: "13.2.2"
+    python: "3.12"
+    torch: "2.13.0"
+    torch_vision: "0.28.0"
+    torch_audio: "2.11.0" # last torchaudio release; absent from the cu132 index -
+                          # the toolchain action installs it best-effort (no builder imports it)
+    # PyTorch >= 2.7 wheels default to the C++11 ABI; only flip this to
+    # "FALSE" if you need to match an older/legacy torch build.
+    cxx11_abi: "TRUE"
+
+  # Same dependency versions, built natively on arm64. Everything the build
+  # needs exists for aarch64: Jimver/cuda-toolkit rewrites its apt repo path
+  # to NVIDIA's "sbsa" one, provision/install_cudnn.sh already maps
+  # aarch64 -> sbsa, and download.pytorch.org publishes
+  # manylinux_2_28_aarch64 CUDA wheels for this torch version. Components
+  # opt in one at a time through `arches` below.
+  - arch: aarch64
+    cuda: "13.2.2"
+    python: "3.11"
+    torch: "2.13.0"
+    torch_vision: "0.28.0"
+    torch_audio: "2.11.0"
+    cxx11_abi: "TRUE"
+
+  - arch: aarch64
+    cuda: "13.2.2"
+    python: "3.12"
+    torch: "2.13.0"
+    torch_vision: "0.28.0"
+    torch_audio: "2.11.0"
+    cxx11_abi: "TRUE"
+
+  # ---- CUDA 13.0 retained for flashinfer only. Its builder rehosts the
+  # prebuilt flashinfer-jit-cache / -cubin data wheels from flashinfer.ai,
+  # which publishes no cu132 index yet (only .../whl/cu130). verl does not
+  # consume this component from the wheelhouse (vllm/sglang pin flashinfer from
+  # PyPI), so it stays on 13.0 until upstream ships cu132. Components opt into
+  # exactly one CUDA via `cuda_versions` below; drop these rows once flashinfer
+  # moves.
   - arch: x86_64
     cuda: "13.0.2"
     python: "3.11"
@@ -59,17 +111,9 @@ build_matrix:
     python: "3.12"
     torch: "2.13.0"
     torch_vision: "0.28.0"
-    torch_audio: "2.11.0" # last torchaudio release; see note above
-    # PyTorch >= 2.7 wheels default to the C++11 ABI; only flip this to
-    # "FALSE" if you need to match an older/legacy torch build.
+    torch_audio: "2.11.0"
     cxx11_abi: "TRUE"
 
-  # Same dependency versions, built natively on arm64. Everything the build
-  # needs exists for aarch64: Jimver/cuda-toolkit rewrites its apt repo path
-  # to NVIDIA's "sbsa" one, provision/install_cudnn.sh already maps
-  # aarch64 -> sbsa, and download.pytorch.org publishes
-  # manylinux_2_28_aarch64 CUDA wheels for this torch version. Components
-  # opt in one at a time through `arches` below.
   - arch: aarch64
     cuda: "13.0.2"
     python: "3.11"
@@ -174,6 +218,17 @@ verl_reference_versions:
 #                  every supported interpreter, and megatron-bridge's
 #                  requires-python is ">=3.12,<3.13" upstream anyway. A second
 #                  build would only race the same asset name onto the release.
+# cuda_versions:   which build_matrix `cuda` values to build this component
+#                  for. Omit it to build for every cuda in build_matrix; list a
+#                  subset to opt out of the rest. Used today because the matrix
+#                  carries both 13.2 (current) and 13.0 (flashinfer's prebuilt
+#                  data wheels have no cu132 index yet): every component pins
+#                  exactly one. A component must not span two cuda values for
+#                  the same (python, torch) - releases are keyed by
+#                  (component, python, torch), not cuda, so two worlds would
+#                  clobber one release; ci/generate_matrix.py rejects this. To
+#                  ship two CUDA worlds of one component, key the release tag
+#                  by cuda first (mirroring the torch-key change in #19).
 # build_timeout:   wall-clock budget for the compile step (e.g. 5h, 10h).
 # job_timeout_minutes: GitHub Actions job timeout for the whole build job;
 #                  must exceed build_timeout plus setup/cache-save overhead.
@@ -186,6 +241,7 @@ components:
     ref: v2.8.3 # FLASH_ATTENTION_VERSION in both verl Dockerfiles
     builder: flash_attention
     wheel_packages: [flash-attn]
+    cuda_versions: ["13.2.2"]
     torch_cuda_arch_list: "8.0;9.0;10.0;12.0"
     requires_cudnn: false
     # CUDA 12.9+ nvcc routinely OOM-kills GitHub's 7 GB runners at max_jobs>1
@@ -211,6 +267,7 @@ components:
     ref: master # both verl Dockerfiles build unpinned git+https://github.com/NVIDIA/apex.git (NVIDIA/apex's default branch is "master", not "main")
     builder: apex
     wheel_packages: [apex]
+    cuda_versions: ["13.2.2"]
     torch_cuda_arch_list: "7.5;8.0;8.6;9.0;10.0;11.0;12.0"
     requires_cudnn: false
     # apex spawns one plain nvcc per translation unit (no nested threading),
@@ -243,6 +300,7 @@ components:
     ref: v2.16.1 # ahead of verl's TRANSFORMER_ENGINE_VERSION (v2.15 as of verl v0.7.1)
     builder: transformer_engine
     wheel_packages: [transformer-engine]
+    cuda_versions: ["13.2.2"]
     torch_cuda_arch_list: "8.0;9.0;10.0"
     requires_cudnn: true
     # Effective nvcc concurrency is max_jobs x NVTE_BUILD_THREADS_PER_JOB, so
@@ -276,6 +334,11 @@ components:
     ref: v0.6.13 # matches flashinfer-python/-cubin pins in vllm's requirements/cuda.txt
     builder: flashinfer
     wheel_packages: [flashinfer-python, flashinfer-cubin, flashinfer-jit-cache]
+    # Stays on CUDA 13.0: the rehosted flashinfer-jit-cache / -cubin data wheels
+    # are only published at https://flashinfer.ai/whl/cu130 (no cu132 index
+    # yet). verl does not consume this component (vllm/sglang pin flashinfer
+    # from PyPI); move it to 13.2 once upstream ships cu132.
+    cuda_versions: ["13.0.2"]
     torch_cuda_arch_list: "8.0 9.0a 10.0a 12.0f"
     # This row rehosts prebuilt wheels (see the arch note below) - nothing is
     # compiled here, and flashinfer-cubin is a ~1.2 GB data wheel far over the
@@ -320,6 +383,10 @@ components:
     # Distribution name from pyproject's [project].name; the wheel file is
     # megatron_bridge-<ver>-py3-none-any.whl (normalizes to megatron-bridge).
     wheel_packages: [megatron-bridge]
+    # Pure-Python wheel, but pinned to one cuda row anyway: releases are keyed
+    # without cuda, so building it from both 13.0 and 13.2 rows would put two
+    # cuda worlds on one tag. Rides the current 13.2 world verl consumes.
+    cuda_versions: ["13.2.2"]
     torch_cuda_arch_list: null # pure-Python wheel: no CUDA gencode flags
     requires_cudnn: false
     max_jobs: 1
@@ -350,6 +417,7 @@ components:
     builder: deep_ep
     # setup.py's distribution name is deep_ep, which normalizes to deep-ep.
     wheel_packages: [deep-ep]
+    cuda_versions: ["13.2.2"]
     # x86_64 includes Ampere (A100, 8.0) plus Hopper/Blackwell. Upstream
     # setup.py cannot fat-bin those: DISABLE_SM90_FEATURES=1 is global and
     # also drops NVSHMEM. ci/patches/enable_deep_ep_sm80.py rewrites the
@@ -400,6 +468,7 @@ components:
     builder: flash_mla
     # setup.py's distribution name is flash_mla, which normalizes to flash-mla.
     wheel_packages: [flash-mla]
+    cuda_versions: ["13.2.2"]
     # null: setup.py emits its own "-gencode arch=compute_90a,code=sm_90a" and
     # "compute_100f/sm_100f" flags and never reads TORCH_CUDA_ARCH_LIST.
     torch_cuda_arch_list: null
@@ -430,6 +499,7 @@ components:
     builder: fast_hadamard_transform
     # setup.py's PACKAGE_NAME is fast_hadamard_transform -> fast-hadamard-transform.
     wheel_packages: [fast-hadamard-transform]
+    cuda_versions: ["13.2.2"]
     # null: setup.py hardcodes its own gencode flags from the *toolkit* version
     # and never reads TORCH_CUDA_ARCH_LIST. On CUDA 13 that is sm_75, sm_80,
     # sm_87, sm_90, sm_100, sm_103, sm_110, sm_120 and sm_121 - which is why this

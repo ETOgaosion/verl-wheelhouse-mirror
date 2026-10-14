@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import build_index
 import generate_matrix
 import release_meta
 from test_cuda_archs import fatbin_elf, make_wheel
@@ -860,6 +861,129 @@ class PythonVersionFilterTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             self._run_cli(["--component", "demo", "--python", "2.7"])
         self.assertEqual(2, ctx.exception.code)
+
+
+def make_cuda_matrix_versions(component_cfg, arches=("x86_64", "aarch64"),
+                              cudas=("13.2.2", "13.0.2")):
+    """A 2 arch x 2 CUDA build_matrix, the current-cuda row first (so the
+    /simple default world is 13.2), each pinned to one Python/torch pair."""
+    return {
+        "build_matrix": [
+            {
+                "arch": arch,
+                "cuda": cuda,
+                "python": "3.12",
+                "torch": DEMO_TORCH,
+                "torch_vision": "0.28.0",
+                "torch_audio": "2.11.0",
+                "cxx11_abi": "TRUE",
+            }
+            for arch in arches
+            for cuda in cudas
+        ],
+        "components": {"demo": component_cfg},
+    }
+
+
+class CudaVersionFilterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cfg = {
+            "ref": "v1.2.3",
+            "path": "demo",
+            "builder": "demo",
+            "wheel_packages": ["demo"],
+            "cuda_versions": ["13.2.2"],
+            "torch_cuda_arch_list": "9.0;10.0",
+            "max_jobs": 4,
+            "runs_on": ["ubuntu-24.04"],
+        }
+        self.versions = make_cuda_matrix_versions(dict(self.cfg))
+
+    def test_matrix_cuda_versions_follow_first_seen_order(self) -> None:
+        self.assertEqual(
+            ["13.2.2", "13.0.2"],
+            generate_matrix.matrix_cuda_versions(self.versions),
+        )
+
+    def test_component_without_cuda_versions_sees_every_cuda(self) -> None:
+        del self.versions["components"]["demo"]["cuda_versions"]
+        self.assertEqual(
+            ["13.2.2", "13.0.2"],
+            generate_matrix.component_cuda_versions(self.versions, "demo"),
+        )
+        combos = generate_matrix.component_combos(self.versions, "demo")
+        self.assertEqual(
+            {("x86_64", "13.2.2"), ("x86_64", "13.0.2"),
+             ("aarch64", "13.2.2"), ("aarch64", "13.0.2")},
+            {
+                (generate_matrix.combo_arch(c), generate_matrix.combo_cuda(c))
+                for c in combos
+            },
+        )
+
+    def test_cuda_versions_subset_pins_one_world(self) -> None:
+        self.assertEqual(
+            ["13.2.2"],
+            generate_matrix.component_cuda_versions(self.versions, "demo"),
+        )
+        combos = generate_matrix.component_combos(self.versions, "demo")
+        self.assertEqual(
+            [("x86_64", "13.2.2"), ("aarch64", "13.2.2")],
+            [
+                (generate_matrix.combo_arch(c), generate_matrix.combo_cuda(c))
+                for c in combos
+            ],
+        )
+
+    def test_component_held_on_older_cuda(self) -> None:
+        # flashinfer today: opt out of the current toolkit and stay on 13.0.
+        self.versions["components"]["demo"]["cuda_versions"] = ["13.0.2"]
+        combos = generate_matrix.component_combos(self.versions, "demo")
+        self.assertTrue(
+            all(generate_matrix.combo_cuda(c) == "13.0.2" for c in combos)
+        )
+        title = generate_matrix.release_title(
+            "v1.2.3",
+            "demo",
+            generate_matrix.component_combos_for_release(
+                self.versions, "demo", "3.12", DEMO_TORCH
+            ),
+        )
+        self.assertEqual(["cu130/torch2.11"], build_index.release_worlds(title))
+
+    def test_cuda_filter_combines_with_arch_filter(self) -> None:
+        cfg = dict(self.cfg, arches=["aarch64"], cuda_versions=["13.0.2"])
+        self.versions["components"]["demo"] = cfg
+        combos = generate_matrix.component_combos(self.versions, "demo")
+        self.assertEqual(
+            [("aarch64", "13.0.2")],
+            [
+                (generate_matrix.combo_arch(c), generate_matrix.combo_cuda(c))
+                for c in combos
+            ],
+        )
+
+    def test_unknown_cuda_version_is_rejected(self) -> None:
+        self.versions["components"]["demo"]["cuda_versions"] = ["13.9.9"]
+        with self.assertRaises(SystemExit) as ctx:
+            generate_matrix.component_cuda_versions(self.versions, "demo")
+        self.assertIn("not in build_matrix", str(ctx.exception))
+        self.assertIn("13.9.9", str(ctx.exception))
+
+    def test_spanning_two_cudas_for_one_python_torch_is_rejected(self) -> None:
+        self.versions["components"]["demo"]["cuda_versions"] = [
+            "13.2.2",
+            "13.0.2",
+        ]
+        with self.assertRaises(SystemExit) as ctx:
+            generate_matrix.build_full_matrix(self.versions, ["demo"])
+        self.assertIn("more than one CUDA", str(ctx.exception))
+        # The release-metadata path must fail closed the same way.
+        with self.assertRaises(SystemExit) as ctx2:
+            generate_matrix.component_combos_for_release(
+                self.versions, "demo", "3.12", DEMO_TORCH
+            )
+        self.assertIn("more than one CUDA", str(ctx2.exception))
 
 
 class PerPythonReleaseTests(unittest.TestCase):

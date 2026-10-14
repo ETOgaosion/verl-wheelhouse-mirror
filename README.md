@@ -30,8 +30,10 @@ resumable build caches).
 Wheels are published to [GitHub Releases](../../releases) - one persistent
 release per component, Python version and torch version, named after that
 component and its pinned dependency versions (e.g.
-`transformer-engine v2.16.1 - cu13.0.2 py3.12 torch2.13.0`, tag
-`transformer-engine-v2.16.1-py3.12-torch2.13.0`) - and to static
+`transformer-engine v2.16.1 - cu13.2.2 py3.12 torch2.13.0`, tag
+`transformer-engine-v2.16.1-py3.12-torch2.13.0` - the tag stays CUDA-free,
+which is why one component cannot ship two CUDA worlds without a tag-scheme
+change) - and to static
 [GitHub Pages](https://pages.github.com/) PEP 503 "simple" package indexes,
 one per CUDA/torch combination, so they're directly `pip install`-able.
 
@@ -91,20 +93,29 @@ the project's base directory - no Python, no workflow YAML - needs to
 change for routine version bumps:
 
 - **`build_matrix`**: the CPU arch / CUDA / Python / Torch combinations to
-  build. Currently CUDA `13.0.2`, Python `3.11` and `3.12`, Torch `2.13.0`
-  (3.12 matches both verl Dockerfiles' `ARG` defaults, though torch is kept
-  ahead of their `2.11.0` pin; 3.11 is added because torch publishes cp311
-  cu130 wheels for both arches and downstream envs still run it), on
-  `x86_64` and `aarch64`. Add another entry to build more combinations -
-  every component is built once per entry here, minus the ones its `arches`
-  / `python_versions` filters exclude.
+  build. The current toolkit is CUDA `13.2.2`, Python `3.11` and `3.12`,
+  Torch `2.13.0` (3.12 matches both verl Dockerfiles' `ARG` defaults, though
+  torch is kept ahead of their `2.11.0` pin; 3.11 is added because torch
+  publishes cp311 cu132 wheels for both arches and downstream envs still run
+  it), on `x86_64` and `aarch64`. The matrix also still carries CUDA
+  `13.0.2` rows, retained for `flashinfer` alone: it rehosts prebuilt
+  jit-cache/cubin data wheels that upstream does not yet publish for cu132.
+  Add another entry to build more combinations - every component is built
+  once per entry here, minus the ones its `arches` / `python_versions` /
+  `cuda_versions` filters exclude. Each component is pinned to exactly one
+  CUDA per (Python, torch) via `cuda_versions`; releases are not keyed by
+  CUDA (only by component/Python/torch), so spanning two CUDA worlds for one
+  pair is rejected and the tag scheme would have to become CUDA-keyed first.
+
 - **`components`**: per-submodule config - the git `ref` to build (branch,
   tag, or commit; overrides whatever commit the submodule pointer in this
   repo is on), which `ci/build_scripts/<builder>.sh` to run, the CUDA arch
   list, whether cuDNN is required, `max_jobs`, the runner label, which CPU
-  arches to build for (`arches`) and which Python versions (`python_versions`)
-  with optional per-arch field overrides (`arch_overrides`), and any extra
-  environment variables.
+  arches to build for (`arches`), which Python versions (`python_versions`)
+  and which CUDA versions (`cuda_versions`) to build for, with optional
+  per-arch field overrides (`arch_overrides`), and any extra environment
+  variables.
+
 - **`verl_reference_versions`**: versions verl's Dockerfiles pin for things
   this repo does *not* build (`transformers`, `trl`, `nsight_systems`,
   `megatron`, `verl` itself) - tracked here purely for compatibility
@@ -142,8 +153,10 @@ and the component's currently-pinned `ref` in `versions.yaml`:
   `transformer-engine-v2.16.1-py3.11-torch2.13.0`
 - **title**: `<component> <ref> - [<arch> ]cu<cuda> py<python> torch<torch>[; ...]`
   with one segment per `build_matrix` row **of that Python and torch** and
-  the `x86_64` arch left implicit, e.g. `apex master - cu13.0.2 py3.11
-  torch2.13.0; aarch64 cu13.0.2 py3.11 torch2.13.0`
+  the `x86_64` arch left implicit, e.g. `apex master - cu13.2.2 py3.11
+  torch2.13.0; aarch64 cu13.2.2 py3.11 torch2.13.0`. The title carries CUDA
+  (the index keys on it), the tag does not, so the rows grouped here must all
+  share one CUDA - enforced by `cuda_versions` in `versions.yaml`.
 
 Both versions are in the tag because a wheel is ABI-bound to each and its
 filename records neither: `apex-0.1-cp312-cp312-linux_x86_64.whl` is the
@@ -232,19 +245,24 @@ refreshed whenever a wheel lands on one of a component's releases (from a
 
 ```bash
 # Pin the world matching your environment (recommended):
-pip install --extra-index-url https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/ flash-attn
+pip install --extra-index-url https://verl-project.github.io/verl-wheelhouse/cu132/torch2.13/simple/ flash-attn
 
-# /simple/ is an alias for whatever versions.yaml currently builds, so it
-# moves to the next torch when the matrix does:
+# /simple/ is an alias for whatever versions.yaml currently builds (today
+# cu132/torch2.13), so it moves when the matrix does:
 pip install --extra-index-url https://verl-project.github.io/verl-wheelhouse/simple/ transformer-engine
 ```
 
-The split is not cosmetic: a wheel built against torch 2.11 and one built
-against torch 2.13 have the same filename *and* the same version, so one
-index cannot hold both and nothing in a plain `pip install apex` could
-express which you need. Picking the URL is what makes the choice explicit -
-the same shape `download.pytorch.org/whl/cu130` and `flashinfer.ai/whl/cu130/torch2.13`
-use. [`../../releases`](../../releases) lists every world's releases; their
+`cu130/torch2.13` still exists but, after the 13.2 move, carries only
+`flashinfer` - its rehosted jit-cache/cubin data wheels are not yet published
+for cu132; every other component is under `cu132/torch2.13`.
+
+The split is not cosmetic: two wheels of one component built against
+different torch or CUDA versions have the same filename *and* the same
+version, so one index cannot hold both and nothing in a plain
+`pip install apex` could express which you need. Picking the URL is what
+makes the choice explicit - the same shape `download.pytorch.org/whl/cu132`
+and `flashinfer.ai/whl/cu130/torch2.13` use.
+[`../../releases`](../../releases) lists every world's releases; their
 landing page at the Pages root enumerates the ones currently published.
 
 Or install a specific wheel directly from that component's

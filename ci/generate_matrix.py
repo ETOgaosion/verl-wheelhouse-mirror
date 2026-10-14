@@ -165,6 +165,10 @@ def combo_torch(combo: Dict[str, Any]) -> str:
     return str(combo["torch"])
 
 
+def combo_cuda(combo: Dict[str, Any]) -> str:
+    return str(combo["cuda"])
+
+
 def matrix_arches(versions: Dict[str, Any]) -> List[str]:
     """Every arch the build_matrix covers, in first-seen order."""
     return list(dict.fromkeys(combo_arch(combo) for combo in versions["build_matrix"]))
@@ -174,6 +178,13 @@ def matrix_python_versions(versions: Dict[str, Any]) -> List[str]:
     """Every Python version the build_matrix covers, in first-seen order."""
     return list(
         dict.fromkeys(combo_python(combo) for combo in versions["build_matrix"])
+    )
+
+
+def matrix_cuda_versions(versions: Dict[str, Any]) -> List[str]:
+    """Every CUDA version the build_matrix covers, in first-seen order."""
+    return list(
+        dict.fromkeys(combo_cuda(combo) for combo in versions["build_matrix"])
     )
 
 
@@ -232,14 +243,70 @@ def component_python_versions(versions: Dict[str, Any], component: str) -> List[
     return [v for v in available if v in {str(p) for p in configured}]
 
 
+def component_cuda_versions(versions: Dict[str, Any], component: str) -> List[str]:
+    """The CUDA versions one component opts into, in build_matrix order.
+
+    Mirrors component_python_versions: no `cuda_versions` field builds for
+    every CUDA version in the matrix; an explicit subset lets the matrix carry
+    several CUDA worlds while each component builds only its own (today: the
+    native kernels on 13.2, flashinfer held on 13.0 pending a cu132 jit-cache
+    index).
+    """
+    cfg = get_component(versions, component)
+    available = matrix_cuda_versions(versions)
+
+    configured = cfg.get("cuda_versions")
+    if configured is None:
+        return available
+
+    unknown = sorted({str(v) for v in configured} - set(available))
+    if unknown:
+        raise SystemExit(
+            f"Component {component!r} lists CUDA version(s) not in build_matrix: "
+            f"{', '.join(unknown)}. Known versions: {', '.join(available)}"
+        )
+    return [v for v in available if v in {str(c) for c in configured}]
+
+
+def assert_single_cuda_per_release(
+    versions: Dict[str, Any], component: str
+) -> None:
+    """Reject a component that spans two CUDA versions for one (Python, torch).
+
+    A release (and its tag) is one (component, Python, torch) triple and the
+    wheel filenames record no CUDA, so rows that share that key but differ in
+    CUDA would build byte-different wheels under identical asset names onto one
+    release - the same clobber torch was keyed to prevent (#19). Each component
+    must therefore pin one CUDA per (Python, torch) via `cuda_versions`. When a
+    component genuinely needs two CUDA worlds, the release tag has to become
+    CUDA-keyed first (mirroring #19).
+    """
+    cuda_by_key: Dict[Tuple[str, str], str] = {}
+    for combo in component_combos(versions, component):
+        key = (combo_python(combo), combo_torch(combo))
+        cuda = combo_cuda(combo)
+        if key in cuda_by_key and cuda_by_key[key] != cuda:
+            raise SystemExit(
+                f"Component {component!r} builds Python {key[0]} / torch {key[1]} against "
+                f"more than one CUDA ({cuda_by_key[key]} and {cuda}). Releases are keyed by "
+                f"(component, python, torch), not CUDA, so these would clobber one release. "
+                f"Pin one via `cuda_versions` in versions.yaml, or make the release tag "
+                f"CUDA-keyed before shipping two CUDA worlds of one component."
+            )
+        cuda_by_key[key] = cuda
+
+
 def component_combos(versions: Dict[str, Any], component: str) -> List[Dict[str, Any]]:
     """The build_matrix rows one component is actually built for."""
     arches = set(component_arches(versions, component))
     pythons = set(component_python_versions(versions, component))
+    cudas = set(component_cuda_versions(versions, component))
     return [
         combo
         for combo in versions["build_matrix"]
-        if combo_arch(combo) in arches and combo_python(combo) in pythons
+        if combo_arch(combo) in arches
+        and combo_python(combo) in pythons
+        and combo_cuda(combo) in cudas
     ]
 
 
@@ -254,6 +321,9 @@ def component_combos_for_release(
     is left inside a single release is the arch dimension, which the wheel
     filename's platform tag already distinguishes.
     """
+    # Fail closed if this (Python, torch) release would mix two CUDA worlds
+    # onto one tag (validates every key, not just the requested one).
+    assert_single_cuda_per_release(versions, component)
     python, torch = str(python), str(torch)
     return [
         combo
@@ -1148,6 +1218,7 @@ def build_matrix_entries(versions: Dict[str, Any], component: str) -> List[Dict[
 def build_full_matrix(versions: Dict[str, Any], components: List[str]) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     for name in components:
+        assert_single_cuda_per_release(versions, name)
         entries.extend(build_matrix_entries(versions, name))
     return entries
 

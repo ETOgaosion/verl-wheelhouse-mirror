@@ -79,14 +79,29 @@ runs:
         source ci/build_scripts/provision/install_cudnn.sh
         install_cudnn
 
-    - name: Install PyTorch ${{ inputs.torch-version }}+cu${{ inputs.cuda-version }}
+    - name: Install PyTorch ${{ inputs.torch-version }} (cu${{ inputs.cuda-version }})
       shell: bash
       run: |
         pip install --upgrade pip
         TORCH_CUDA_TAG="cu$(echo '${{ inputs.cuda-version }}' | cut -d. -f1,2 | tr -d '.')"
+        TORCH_INDEX="https://download.pytorch.org/whl/${TORCH_CUDA_TAG}"
+        # torch / torchvision are the ABI-coupled core; both exist on cu130 and
+        # cu132 for the pinned versions, so they always come from the CUDA index.
         pip install \
           "torch==${{ inputs.torch-version }}" \
           "torchvision==${{ inputs.torch-vision-version }}" \
-          "torchaudio==${{ inputs.torch-audio-version }}" \
-          --index-url "https://download.pytorch.org/whl/${TORCH_CUDA_TAG}"
+          --index-url "${TORCH_INDEX}"
+        # torchaudio is a matrix-completeness pin only: no builder imports it and
+        # its wheel declares no torch dependency. pytorch published 2.11.0 on the
+        # cu130 index but not cu132, so install it best-effort - CUDA index first,
+        # then PyPI - with --no-deps so it can never move torch, and warn instead
+        # of failing the whole toolchain when it is missing.
+        if ! pip install --no-deps \
+              "torchaudio==${{ inputs.torch-audio-version }}" \
+              --index-url "${TORCH_INDEX}"; then
+          echo "::warning::torchaudio ${{ inputs.torch-audio-version }} not on ${TORCH_INDEX}; trying PyPI"
+          if ! pip install --no-deps "torchaudio==${{ inputs.torch-audio-version }}"; then
+            echo "::warning::torchaudio ${{ inputs.torch-audio-version }} unavailable on ${TORCH_INDEX} and PyPI; continuing - no build script imports it"
+          fi
+        fi
         python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
