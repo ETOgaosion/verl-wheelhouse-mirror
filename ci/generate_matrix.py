@@ -268,34 +268,6 @@ def component_cuda_versions(versions: Dict[str, Any], component: str) -> List[st
     return [v for v in available if v in {str(c) for c in configured}]
 
 
-def assert_single_cuda_per_release(
-    versions: Dict[str, Any], component: str
-) -> None:
-    """Reject a component that spans two CUDA versions for one (Python, torch).
-
-    A release (and its tag) is one (component, Python, torch) triple and the
-    wheel filenames record no CUDA, so rows that share that key but differ in
-    CUDA would build byte-different wheels under identical asset names onto one
-    release - the same clobber torch was keyed to prevent (#19). Each component
-    must therefore pin one CUDA per (Python, torch) via `cuda_versions`. When a
-    component genuinely needs two CUDA worlds, the release tag has to become
-    CUDA-keyed first (mirroring #19).
-    """
-    cuda_by_key: Dict[Tuple[str, str], str] = {}
-    for combo in component_combos(versions, component):
-        key = (combo_python(combo), combo_torch(combo))
-        cuda = combo_cuda(combo)
-        if key in cuda_by_key and cuda_by_key[key] != cuda:
-            raise SystemExit(
-                f"Component {component!r} builds Python {key[0]} / torch {key[1]} against "
-                f"more than one CUDA ({cuda_by_key[key]} and {cuda}). Releases are keyed by "
-                f"(component, python, torch), not CUDA, so these would clobber one release. "
-                f"Pin one via `cuda_versions` in versions.yaml, or make the release tag "
-                f"CUDA-keyed before shipping two CUDA worlds of one component."
-            )
-        cuda_by_key[key] = cuda
-
-
 def component_combos(versions: Dict[str, Any], component: str) -> List[Dict[str, Any]]:
     """The build_matrix rows one component is actually built for."""
     arches = set(component_arches(versions, component))
@@ -311,34 +283,34 @@ def component_combos(versions: Dict[str, Any], component: str) -> List[Dict[str,
 
 
 def component_combos_for_release(
-    versions: Dict[str, Any], component: str, python: str, torch: str
+    versions: Dict[str, Any], component: str, python: str, torch: str, cuda: str
 ) -> List[Dict[str, Any]]:
-    """The component's build_matrix rows for one (Python, torch) pair only.
+    """The component's build_matrix rows for one (Python, torch, CUDA) key.
 
-    One GitHub Release covers exactly one (component, Python, torch) triple,
-    so release title/manifest/notes are all computed from this subset rather
-    than from every combo the component builds (which spans releases). What
-    is left inside a single release is the arch dimension, which the wheel
-    filename's platform tag already distinguishes.
+    One GitHub Release covers exactly one (component, Python, torch, CUDA)
+    tuple, so release title/manifest/notes are all computed from this subset
+    rather than from every combo the component builds (which spans releases).
+    What is left inside a single release is the arch dimension (the x86_64
+    and aarch64 rows share one tag), which the wheel filename's platform tag
+    already distinguishes.
     """
-    # Fail closed if this (Python, torch) release would mix two CUDA worlds
-    # onto one tag (validates every key, not just the requested one).
-    assert_single_cuda_per_release(versions, component)
-    python, torch = str(python), str(torch)
+    python, torch, cuda = str(python), str(torch), str(cuda)
     return [
         combo
         for combo in component_combos(versions, component)
-        if combo_python(combo) == python and combo_torch(combo) == torch
+        if combo_python(combo) == python
+        and combo_torch(combo) == torch
+        and combo_cuda(combo) == cuda
     ]
 
 
 def component_release_keys(
     versions: Dict[str, Any], component: str
-) -> List[Tuple[str, str]]:
-    """Every (Python, torch) pair the component releases for, in matrix order."""
+) -> List[Tuple[str, str, str]]:
+    """Every (Python, torch, CUDA) tuple the component releases for, in order."""
     return list(
         dict.fromkeys(
-            (combo_python(combo), combo_torch(combo))
+            (combo_python(combo), combo_torch(combo), combo_cuda(combo))
             for combo in component_combos(versions, component)
         )
     )
@@ -356,9 +328,38 @@ def component_torch_versions(
     python = str(python)
     return list(
         dict.fromkeys(
-            torch for py, torch in component_release_keys(versions, component) if py == python
+            torch
+            for py, torch, _cuda in component_release_keys(versions, component)
+            if py == python
         )
     )
+
+
+def component_cuda_for(
+    versions: Dict[str, Any], component: str, python: str, torch: str
+) -> str:
+    """The single CUDA version for one component's (Python, torch) release.
+
+    Each active component pins one CUDA per (Python, torch) via
+    `cuda_versions`, so the ambient-python release_meta path (which is passed
+    --torch but not --cuda) resolves unambiguously. Fails closed if a future
+    matrix ever puts two CUDAs on one (Python, torch) without the caller
+    naming one.
+    """
+    python, torch = str(python), str(torch)
+    cudas = list(
+        dict.fromkeys(
+            cuda
+            for py, ctorch, cuda in component_release_keys(versions, component)
+            if py == python and ctorch == torch
+        )
+    )
+    if len(cudas) != 1:
+        raise SystemExit(
+            f"Component {component!r} builds Python {python} / torch {torch} against "
+            f"{len(cudas)} CUDA version(s) ({', '.join(cudas) or 'none'}); pass --cuda."
+        )
+    return cudas[0]
 
 
 def check_runner_policy(component: str, arch: str, runs_on: Any) -> None:
@@ -397,23 +398,37 @@ def sanitize_ref(ref: str) -> str:
     return sanitized or "unknown"
 
 
-def release_tag(component: str, ref: str, python: str, torch: str) -> str:
-    """Persistent release tag for one (component, Python, torch) triple.
+def release_cuda_tag(cuda: str) -> str:
+    """CUDA as a release-tag suffix: "13.0.2" -> "cu130", "13.2.2" -> "cu132".
+
+    Same major.minor roll-up as the index world path (a wheel built against
+    13.0.x belongs to the cu130 world); the patch is not part of the ABI key.
+    """
+    return "cu" + "".join(str(cuda).split(".")[:2])
+
+
+def release_tag(component: str, ref: str, python: str, torch: str, cuda: str) -> str:
+    """Persistent release tag for one (component, Python, torch, CUDA) tuple.
 
     Keyed by the component's pinned ref rather than by a shared
-    "latest"/repo-level tag: rebuilding the same triple re-uploads wheels
+    "latest"/repo-level tag: rebuilding the same tuple re-uploads wheels
     onto the same release, and bumping the ref in versions.yaml starts a new
     release, leaving the old one as history.
 
-    Python and torch are both spelled out, e.g.
-    "apex-master-py3.12-torch2.13.0", because a wheel is ABI-bound to both
-    and neither appears in the wheel filename: sharing one tag across torch
-    versions makes the second build clobber the first one's assets, which
-    breaks every consumer already pinned to those download URLs. Shared with
+    Python, torch and CUDA are all spelled out, e.g.
+    "apex-master-py3.12-torch2.13.0-cu132". A wheel is ABI-bound to torch and
+    CUDA and its filename records neither, so the tag must distinguish both:
+    sharing one tag across torch versions (#19's original bug) or across CUDA
+    versions (the cu130 -> cu132 move clobbered the cu130 torch2.13 wheels)
+    makes the second build overwrite the first one's assets and silently serve
+    an ABI-mismatched wheel to every URL already pinned. Shared with
     ci/release_meta.py so the release that gets created/updated and the tag
     _build.yml uploads wheels to always match.
     """
-    return f"{component}-{sanitize_ref(ref)}-py{python}-torch{torch}"
+    return (
+        f"{component}-{sanitize_ref(ref)}-py{python}-torch{torch}"
+        f"-{release_cuda_tag(cuda)}"
+    )
 
 
 def release_title(ref: str, component: str, combos: List[Dict[str, Any]]) -> str:
@@ -626,7 +641,7 @@ def combo_build_config(
 
 
 def component_build_manifest(
-    versions: Dict[str, Any], component: str, python: str, torch: str
+    versions: Dict[str, Any], component: str, python: str, torch: str, cuda: str
 ) -> Dict[str, Any]:
     """JSON snapshot of every wheel-producing combo for one release."""
     return {
@@ -634,28 +649,31 @@ def component_build_manifest(
         "component": component,
         "python": str(python),
         "torch": str(torch),
+        "cuda": str(cuda),
         "builds": [
             combo_build_config(versions, component, combo)
-            for combo in component_combos_for_release(versions, component, python, torch)
+            for combo in component_combos_for_release(
+                versions, component, python, torch, cuda
+            )
         ],
     }
 
 
 def format_release_notes(
-    versions: Dict[str, Any], component: str, python: str, torch: str
+    versions: Dict[str, Any], component: str, python: str, torch: str, cuda: str
 ) -> str:
     """Human-readable notes plus a hidden JSON snapshot of each wheel's build config."""
     cfg = get_component(versions, component)
     ref = str(cfg["ref"])
     blob = json.dumps(
-        component_build_manifest(versions, component, python, torch),
+        component_build_manifest(versions, component, python, torch, cuda),
         indent=2,
         sort_keys=True,
     )
     return (
-        f"Prebuilt CUDA wheel(s) for {component} on Python {python} / torch {torch}, "
-        f"pinned to `{ref}`. See versions.yaml at this ref for the exact dependency "
-        "versions.\n\n"
+        f"Prebuilt CUDA wheel(s) for {component} on Python {python} / torch {torch} / "
+        f"CUDA {cuda}, pinned to `{ref}`. See versions.yaml at this ref for the exact "
+        "dependency versions.\n\n"
         f"<!-- {BUILD_CONFIG_MARKER}\n{blob}\n-->"
     )
 
@@ -872,9 +890,12 @@ def release_covers_combo(
     ref = str(cfg["ref"])
     python = combo_python(combo)
     torch = combo_torch(combo)
-    tag = release_tag(component, ref, python, torch)
+    cuda = combo_cuda(combo)
+    tag = release_tag(component, ref, python, torch, cuda)
     expected_title = release_title(
-        ref, component, component_combos_for_release(versions, component, python, torch)
+        ref,
+        component,
+        component_combos_for_release(versions, component, python, torch, cuda),
     )
     actual_title = release.get("name")
     if actual_title != expected_title:
@@ -944,13 +965,14 @@ def release_covers_component(
     component: str,
     python: str,
     torch: str,
+    cuda: str,
     release: Dict[str, Any],
     repo: Optional[str] = None,
     verify_wheels: bool = True,
 ) -> Tuple[bool, str]:
     """Check that every matrix row for one release is covered."""
     last_reason = "exact title, matching build config, and all expected wheel packages are present"
-    for combo in component_combos_for_release(versions, component, python, torch):
+    for combo in component_combos_for_release(versions, component, python, torch, cuda):
         covered, reason = release_covers_combo(
             versions, component, combo, release, repo, verify_wheels=verify_wheels
         )
@@ -997,23 +1019,23 @@ def components_needing_build(
 ) -> List[str]:
     """Drop components whose every release already covers all its rows.
 
-    A component ships one release per (Python, torch) pair it builds for;
-    each release tag is inspected at most once, and the component is kept as
-    soon as one of those releases is missing or does not cover its rows.
+    A component ships one release per (Python, torch, CUDA) tuple it builds
+    for; each release tag is inspected at most once, and the component is
+    kept as soon as one of those releases is missing or does not cover rows.
     """
     needed = []
     for component in components:
         cfg = get_component(versions, component)
         keep = False
-        for python, torch in component_release_keys(versions, component):
-            label = f"{component} py{python} torch{torch}"
-            tag = release_tag(component, str(cfg["ref"]), python, torch)
+        for python, torch, cuda in component_release_keys(versions, component):
+            label = f"{component} py{python} torch{torch} {release_cuda_tag(cuda)}"
+            tag = release_tag(component, str(cfg["ref"]), python, torch, cuda)
             release = inspect_release(repo, tag)
             if release is None:
                 keep = True
                 continue
             covered, reason = release_covers_component(
-                versions, component, python, torch, release, repo
+                versions, component, python, torch, cuda, release, repo
             )
             if covered:
                 print(f"Skipping {label}: release {tag!r} {reason}.", file=sys.stderr)
@@ -1064,7 +1086,10 @@ def evaluate_matrix_rows(
         component = str(entry["component"])
         python = str(entry["python"])
         tag = str(entry["release_tag"])
-        label = f"{component} ({entry['arch']}, py{python}, torch{entry['torch']})"
+        label = (
+            f"{component} ({entry['arch']}, py{python}, "
+            f"torch{entry['torch']}, {release_cuda_tag(str(entry['cuda']))})"
+        )
         if tag not in releases:
             releases[tag] = inspect_release(repo, tag)
         release = releases[tag]
@@ -1181,7 +1206,11 @@ def build_matrix_entries(versions: Dict[str, Any], component: str) -> List[Dict[
                 "path": cfg["path"],
                 "ref": ref,
                 "release_tag": release_tag(
-                    component, ref, combo_python(combo), combo_torch(combo)
+                    component,
+                    ref,
+                    combo_python(combo),
+                    combo_torch(combo),
+                    combo_cuda(combo),
                 ),
                 "builder": cfg["builder"],
                 "arch": arch,
@@ -1218,7 +1247,6 @@ def build_matrix_entries(versions: Dict[str, Any], component: str) -> List[Dict[
 def build_full_matrix(versions: Dict[str, Any], components: List[str]) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     for name in components:
-        assert_single_cuda_per_release(versions, name)
         entries.extend(build_matrix_entries(versions, name))
     return entries
 

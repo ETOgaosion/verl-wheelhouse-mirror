@@ -1,30 +1,34 @@
 #!/usr/bin/env python3
-"""One-time migration: retag existing releases to the per-torch tag scheme.
+"""One-time migration: retag existing releases to the per-(torch, CUDA) scheme.
 
-Releases used to be keyed by (component, Python) with the legacy interpreter
-on a bare "<component>-<ref>" tag; they are now keyed by (component, Python,
-torch) - see release_tag in ci/generate_matrix.py. This script renames the
-releases already on GitHub to match, so their assets keep their identity
-instead of being rebuilt:
+Releases used to be keyed by (component, Python) on a bare
+"<component>-<ref>" tag, then by (component, Python, torch) as
+"<...>-pyX.Y-torch<ver>"; they are now keyed by (component, Python, torch,
+CUDA) as "<...>-pyX.Y-torch<ver>-cu<maj><min>" - see release_tag in
+ci/generate_matrix.py. Adding CUDA to the tag is what stops a cu130 -> cu132
+bump (same torch) from overwriting the cu130 wheels, the way keying on torch
+stopped torch bumps earlier. This script renames releases already on GitHub
+to match, so their assets keep their identity instead of being rebuilt:
 
-    apex-master              -> apex-master-py3.12-torch2.13.0
-    apex-master-py3.11       -> apex-master-py3.11-torch2.13.0
+    apex-master-py3.12-torch2.13.0
+        -> apex-master-py3.12-torch2.13.0-cu130   (when its title says cu13.0.2)
+    apex-master-py3.12-torch2.13.0               (cu13.2.2 wheels)
+        -> apex-master-py3.12-torch2.13.0-cu132
 
 Nothing is recompiled and no asset is re-uploaded; `gh release edit --tag`
 only moves the release (and creates the new git tag). The old tag's download
 URLs stop resolving, which is the intended outcome: a 404 is a loud signal to
-re-pin, where the previous behaviour - a torch bump silently overwriting the
-wheels behind a URL that lock files already reference - was a silent ABI
-mismatch.
+re-pin, where a CUDA bump silently overwriting the wheels behind a URL lock
+files reference was a silent ABI mismatch.
 
 The new tag is derived from the release *title*, which release_meta.py
 generates as "<component> <ref> - [<arch> ]cu<cuda> py<python> torch<torch>",
-so the component/ref split never has to be guessed out of a dash-separated
-tag. Two consequences worth knowing before running it:
+so component/ref and the CUDA world never have to be guessed out of a
+dash-separated tag. Two consequences worth knowing before running it:
 
   * Run it only when no build is in flight. A release's title is refreshed
     at the start of a build and its wheels are uploaded at the end, so a
-    running build means the title already describes a torch the attached
+    running build means the title already describes a CUDA the attached
     wheels are not from yet - and retagging mid-run also moves the release
     out from under the job's own upload step.
   * `gh release edit --tag` creates the new git tag but leaves the old one
@@ -50,9 +54,11 @@ from generate_matrix import release_tag
 # "<component> <ref> - <segments>", e.g.
 # "flash-attention v2.8.3 - cu13.0.2 py3.11 torch2.11.0; aarch64 ...".
 _TITLE_RE = re.compile(r"^(?P<component>\S+)\s+(?P<ref>\S+)\s+-\s+(?P<segments>.+)$")
-# Every build segment carries the same Python/torch within one release; the
-# first one is enough to key it.
-_SEGMENT_RE = re.compile(r"py(?P<python>[\w.]+)\s+torch(?P<torch>[\w.+]+)")
+# Every build segment carries the same CUDA/Python/torch within one release;
+# the first one is enough to key it.
+_SEGMENT_RE = re.compile(
+    r"cu(?P<cuda>[\w.]+)\s+py(?P<python>[\w.]+)\s+torch(?P<torch>[\w.+]+)"
+)
 
 
 def gh_json(*args: str) -> object:
@@ -66,15 +72,15 @@ def planned_tag(title: str) -> Optional[str]:
     if not title_match:
         return None
     segments = {
-        (match["python"], match["torch"])
+        (match["cuda"], match["python"], match["torch"])
         for match in _SEGMENT_RE.finditer(title_match["segments"])
     }
     if len(segments) != 1:
-        # A release spanning several Python/torch pairs predates the split
-        # entirely and cannot be expressed as one tag; leave it for a human.
+        # A release spanning several CUDA/Python/torch tuples cannot be
+        # expressed as one tag; leave it for a human.
         return None
-    python, torch = segments.pop()
-    return release_tag(title_match["component"], title_match["ref"], python, torch)
+    cuda, python, torch = segments.pop()
+    return release_tag(title_match["component"], title_match["ref"], python, torch, cuda)
 
 
 def plan_migration(repo: str) -> List[Dict[str, str]]:

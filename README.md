@@ -28,14 +28,17 @@ GitHub-hosted runners (disk cleanup, swap space, capped parallelism,
 resumable build caches).
 
 Wheels are published to [GitHub Releases](../../releases) - one persistent
-release per component, Python version and torch version, named after that
-component and its pinned dependency versions (e.g.
+release per component, Python version, torch version **and CUDA**, named
+after that component and its pinned dependency versions (e.g.
 `transformer-engine v2.16.1 - cu13.2.2 py3.12 torch2.13.0`, tag
-`transformer-engine-v2.16.1-py3.12-torch2.13.0` - the tag stays CUDA-free,
-which is why one component cannot ship two CUDA worlds without a tag-scheme
-change) - and to static
+`transformer-engine-v2.16.1-py3.12-torch2.13.0-cu132`) - and to static
 [GitHub Pages](https://pages.github.com/) PEP 503 "simple" package indexes,
 one per CUDA/torch combination, so they're directly `pip install`-able.
+Keying the tag on CUDA (`-cu130` / `-cu132`) is what lets two CUDA worlds of
+the same torch coexist: a CUDA bump opens a new release instead of
+overwriting the old one's wheels (historical releases are kept and indexed,
+and can be republished without recompiling via
+`ci/restore_release_wheels.py`).
 
 ## Repo layout
 
@@ -142,51 +145,61 @@ python3 ci/generate_matrix.py --component apex | python3 -m json.tool
 python3 ci/generate_matrix.py --component all
 ```
 
-## Releases: one persistent release per component, Python and torch
+## Releases: one persistent release per component, Python, torch and CUDA
 
 Every component gets **its own GitHub Release for each (Python version,
-torch version) pair it builds for** - there is no single combined release
-for "the repo" as a whole. `ci/release_meta.py` computes, for such a triple
-and the component's currently-pinned `ref` in `versions.yaml`:
+torch version, CUDA) tuple it builds for** - there is no single combined
+release for "the repo" as a whole. `ci/release_meta.py` computes, for such
+a tuple and the component's currently-pinned `ref` in `versions.yaml`:
 
-- **tag**: `<component>-<ref>-pyX.Y-torch<torch>`, e.g.
-  `transformer-engine-v2.16.1-py3.11-torch2.13.0`
+- **tag**: `<component>-<ref>-pyX.Y-torch<torch>-cu<maj><min>`, e.g.
+  `transformer-engine-v2.16.1-py3.11-torch2.13.0-cu132` (the cu130 build of
+  the same torch is `...-cu130`)
 - **title**: `<component> <ref> - [<arch> ]cu<cuda> py<python> torch<torch>[; ...]`
-  with one segment per `build_matrix` row **of that Python and torch** and
-  the `x86_64` arch left implicit, e.g. `apex master - cu13.2.2 py3.11
-  torch2.13.0; aarch64 cu13.2.2 py3.11 torch2.13.0`. The title carries CUDA
-  (the index keys on it), the tag does not, so the rows grouped here must all
-  share one CUDA - enforced by `cuda_versions` in `versions.yaml`.
+  with one segment per `build_matrix` row **of that Python, torch and
+  CUDA** and the `x86_64` arch left implicit, e.g.
+  `apex master - cu13.2.2 py3.11 torch2.13.0; aarch64 cu13.2.2 py3.11
+  torch2.13.0`. The x86_64 and aarch64 rows share one release (the wheel
+  filename's platform tag distinguishes them); different CUDAs never do.
 
-Both versions are in the tag because a wheel is ABI-bound to each and its
-filename records neither: `apex-0.1-cp312-cp312-linux_x86_64.whl` is the
-name a torch 2.11 build and a torch 2.13 build both produce. Sharing one
-tag across torch versions therefore meant the newer build silently
-overwrote the older one's assets - changing what every already-published
-download URL (including the ones pinned in a `uv.lock`) serves, with no
-version or hash to notice it by. Arch stays *inside* a release, because
-there the wheel filename's platform tag does distinguish the files.
+Python, torch and CUDA are all in the tag because a wheel is ABI-bound to
+each and its filename records none of them: `apex-0.1-cp312-cp312-linux_x86_64.whl`
+is the name a torch 2.11 build and a torch 2.13 build - or a cu130 and a
+cu132 build - both produce. Sharing one tag across them meant the newer
+build silently overwrote the older one's assets, changing what every
+already-published download URL (including the ones pinned in a `uv.lock`)
+serves with no version or hash to notice it by. Arch stays *inside* a
+release because there the platform tag does distinguish the files.
 
-Adding a Python or torch version now creates new releases instead of
-editing existing ones: the new wheels go to the new tag, while the older
-releases keep their exact tag/title/manifest and stay skippable (no churn
-rebuild) and installable.
+Adding a Python, torch **or CUDA** version now creates new releases
+instead of editing existing ones: the new wheels go to the new tag, while
+the older releases keep their exact tag/title/manifest and stay skippable
+(no churn rebuild) and installable. A component may list several
+`cuda_versions` for one (Python, torch) to deliberately publish both
+worlds; or an old world that was overwritten before this keying can be
+republished from retained build artifacts with `restore_release_wheels.py`
+(no recompile).
 
 The build workflow creates the release inline while uploading: `_build.yml`
 runs `ci/release_meta.py` under the matrix row's own setup-python
 interpreter, so the interpreter needs no workflow input (no `--python` is
-passed); torch has no such ambient source and is passed as `--torch`.
-Rebuilding the same triple re-uploads (`--clobber`) wheels onto that same
-release; bumping a component's `ref` - or the matrix's torch - starts
-**brand-new** releases under new tags, leaving the previous releases (and
-their wheels) untouched as a historical record.
+passed); torch has no such ambient source and is passed as `--torch`, and
+CUDA is inferred from the single cuda that (Python, torch) builds against
+(`--cuda` names it only if a matrix ever carries two). Rebuilding the same
+tuple re-uploads (`--clobber`) wheels onto that same release; bumping a
+component's `ref` - or the matrix's torch/CUDA - starts **brand-new**
+releases under new tags, leaving the previous releases (and their wheels)
+untouched as a historical record.
 
-Two one-time maintenance scripts exist for the migration to this scheme:
-`ci/migrate_release_tags.py` retags releases created under the older
-(component, Python) scheme, and `ci/restore_release_wheels.py` republishes
-wheels that a torch bump overwrote back onto their own release, reading
-them from the build's still-retained workflow artifacts. Both default to a
-dry run and take `--apply` to act.
+Two maintenance scripts keep older worlds reachable (both default to a dry
+run and take `--apply`): `ci/migrate_release_tags.py` retags releases
+created before the tag included torch/CUDA, deriving the new tag from each
+release's title (run once when the scheme changes, with no build in
+flight); `ci/restore_release_wheels.py` republishes wheels a bump
+overwrote - back onto their own cuda-keyed release - reading them from the
+build's still-retained (90-day) workflow artifacts, so an old CUDA/torch
+world becomes installable again without recompiling. Re-run the
+`Publish package index` workflow afterwards to refresh the static indexes.
 
 ## Triggering builds
 
@@ -267,8 +280,8 @@ landing page at the Pages root enumerates the ones currently published.
 
 Or install a specific wheel directly from that component's
 [release page](../../releases) - look for the tag
-`<component>-<ref>-pyX.Y-torch<torch>` (e.g.
-`transformer-engine-v2.16.1-py3.11-torch2.13.0`).
+`<component>-<ref>-pyX.Y-torch<torch>-cu<maj><min>` (e.g.
+`transformer-engine-v2.16.1-py3.11-torch2.13.0-cu132`).
 
 On a fork, substitute your own `https://<owner>.github.io/<repo>/`
 and enable Pages first (Settings → Pages → Source: GitHub Actions);

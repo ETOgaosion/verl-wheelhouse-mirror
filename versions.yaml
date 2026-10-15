@@ -95,9 +95,9 @@ build_matrix:
   # prebuilt flashinfer-jit-cache / -cubin data wheels from flashinfer.ai,
   # which publishes no cu132 index yet (only .../whl/cu130). verl does not
   # consume this component from the wheelhouse (vllm/sglang pin flashinfer from
-  # PyPI), so it stays on 13.0 until upstream ships cu132. Components opt into
-  # exactly one CUDA via `cuda_versions` below; drop these rows once flashinfer
-  # moves.
+  # PyPI), so it stays on 13.0 until upstream ships cu132. Components choose
+  # their CUDA row(s) via `cuda_versions` below (several are allowed - each is
+  # a separate cuda-keyed release); drop these rows once flashinfer moves.
   - arch: x86_64
     cuda: "13.0.2"
     python: "3.11"
@@ -222,13 +222,15 @@ verl_reference_versions:
 #                  for. Omit it to build for every cuda in build_matrix; list a
 #                  subset to opt out of the rest. Used today because the matrix
 #                  carries both 13.2 (current) and 13.0 (flashinfer's prebuilt
-#                  data wheels have no cu132 index yet): every component pins
-#                  exactly one. A component must not span two cuda values for
-#                  the same (python, torch) - releases are keyed by
-#                  (component, python, torch), not cuda, so two worlds would
-#                  clobber one release; ci/generate_matrix.py rejects this. To
-#                  ship two CUDA worlds of one component, key the release tag
-#                  by cuda first (mirroring the torch-key change in #19).
+#                  data wheels have no cu132 index yet). A component MAY list
+#                  several cudas for the same (python, torch): each gets its own
+#                  release tag (the tag is keyed by component/ref/python/torch/
+#                  cuda, "<...>-torch<ver>-cu130" vs "-cu132"), so the worlds
+#                  never overwrite each other and both stay indexed. Listing a
+#                  second cuda is the supported way to keep an older CUDA world
+#                  building (one-time extra CI); historical wheels from an old
+#                  cuda can instead be republished without recompiling with
+#                  ci/restore_release_wheels.py.
 # build_timeout:   wall-clock budget for the compile step (e.g. 5h, 10h).
 # job_timeout_minutes: GitHub Actions job timeout for the whole build job;
 #                  must exceed build_timeout plus setup/cache-save overhead.
@@ -383,9 +385,8 @@ components:
     # Distribution name from pyproject's [project].name; the wheel file is
     # megatron_bridge-<ver>-py3-none-any.whl (normalizes to megatron-bridge).
     wheel_packages: [megatron-bridge]
-    # Pure-Python wheel, but pinned to one cuda row anyway: releases are keyed
-    # without cuda, so building it from both 13.0 and 13.2 rows would put two
-    # cuda worlds on one tag. Rides the current 13.2 world verl consumes.
+    # Pure-Python wheel, so it builds once on the current 13.2 world; a
+    # separate 13.0 build would produce the same CUDA-independent bytes.
     cuda_versions: ["13.2.2"]
     torch_cuda_arch_list: null # pure-Python wheel: no CUDA gencode flags
     requires_cudnn: false

@@ -120,9 +120,15 @@ def plan_restores(
                 )
                 continue
             ref = str(cfg["ref"])
-            python, torch_version = match["python"], match["torch"]
-            tag = release_tag(component, ref, python, torch_version)
-            combos = component_combos_for_release(versions, component, python, torch_version)
+            python, torch_version, cuda = (
+                match["python"],
+                match["torch"],
+                match["cuda"],
+            )
+            tag = release_tag(component, ref, python, torch_version, cuda)
+            combos = component_combos_for_release(
+                versions, component, python, torch_version, cuda
+            )
             entry = by_tag.setdefault(
                 tag,
                 {
@@ -130,6 +136,7 @@ def plan_restores(
                     "ref": ref,
                     "python": python,
                     "torch": torch_version,
+                    "cuda": cuda,
                     "title": release_title(ref, component, combos),
                     "artifacts": [],
                 },
@@ -142,7 +149,7 @@ def release_notes(entry: Dict[str, Any], run_ids: List[str]) -> str:
     runs = ", ".join(sorted({artifact["run_id"] for artifact in entry["artifacts"]}))
     return (
         f"Prebuilt CUDA wheel(s) for {entry['component']} on Python {entry['python']} / "
-        f"torch {entry['torch']}, pinned to `{entry['ref']}`.\n\n"
+        f"torch {entry['torch']} / CUDA {entry['cuda']}, pinned to `{entry['ref']}`.\n\n"
         "Restored from the build's workflow artifacts (runs "
         f"{runs}) after a torch bump overwrote them on the release that predated "
         "per-torch release tags. The wheels are the original build's bytes; no "

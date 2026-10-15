@@ -38,19 +38,26 @@ def make_versions(component):
     }
 
 
-def make_release(versions, assets, python="3.12", torch=DEMO_TORCH):
+DEMO_CUDA = "13.0.2"
+
+
+def make_release(versions, assets, python="3.12", torch=DEMO_TORCH, cuda=DEMO_CUDA):
     """A release dict whose title/notes are computed the way release_meta.py
-    computes them for one (component, Python, torch) release, so the hidden
-    body manifest matches versions.yaml exactly."""
+    computes them for one (component, Python, torch, CUDA) release, so the
+    hidden body manifest matches versions.yaml exactly."""
     cfg = versions["components"]["demo"]
     ref = str(cfg["ref"])
     return {
         "name": generate_matrix.release_title(
             ref,
             "demo",
-            generate_matrix.component_combos_for_release(versions, "demo", python, torch),
+            generate_matrix.component_combos_for_release(
+                versions, "demo", python, torch, cuda
+            ),
         ),
-        "body": generate_matrix.format_release_notes(versions, "demo", python, torch),
+        "body": generate_matrix.format_release_notes(
+            versions, "demo", python, torch, cuda
+        ),
         "assets": [{"name": name, "size": size} for name, size in assets],
     }
 
@@ -83,14 +90,14 @@ class ExistingReleaseTests(unittest.TestCase):
 
     def test_exact_release_covers_component(self) -> None:
         covered, _ = generate_matrix.release_covers_component(
-            self.versions, "demo", "3.12", DEMO_TORCH, self.release
+            self.versions, "demo", "3.12", DEMO_TORCH, DEMO_CUDA, self.release
         )
         self.assertTrue(covered)
 
     def test_dependency_title_must_match_exactly(self) -> None:
         self.release["name"] = "demo v1.2.3 - cu12.8.1 py3.12 torch2.11.0"
         covered, reason = generate_matrix.release_covers_component(
-            self.versions, "demo", "3.12", DEMO_TORCH, self.release
+            self.versions, "demo", "3.12", DEMO_TORCH, DEMO_CUDA, self.release
         )
         self.assertFalse(covered)
         self.assertIn("title mismatch", reason)
@@ -98,7 +105,7 @@ class ExistingReleaseTests(unittest.TestCase):
     def test_every_expected_wheel_package_is_required(self) -> None:
         self.release["assets"].pop()
         covered, reason = generate_matrix.release_covers_component(
-            self.versions, "demo", "3.12", DEMO_TORCH, self.release
+            self.versions, "demo", "3.12", DEMO_TORCH, DEMO_CUDA, self.release
         )
         self.assertFalse(covered)
         self.assertIn("demo-helper", reason)
@@ -106,7 +113,7 @@ class ExistingReleaseTests(unittest.TestCase):
     def test_missing_manifest_forces_rebuild(self) -> None:
         self.release["body"] = "human notes only, no snapshot"
         covered, reason = generate_matrix.release_covers_component(
-            self.versions, "demo", "3.12", DEMO_TORCH, self.release
+            self.versions, "demo", "3.12", DEMO_TORCH, DEMO_CUDA, self.release
         )
         self.assertFalse(covered)
         self.assertIn("no stored build config", reason)
@@ -119,7 +126,7 @@ class ExistingReleaseTests(unittest.TestCase):
         )
         self.assertEqual([], needed)
         inspect_release.assert_called_once_with(
-            "owner/repo", f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}"
+            "owner/repo", f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}-cu130"
         )
 
     @patch("generate_matrix.inspect_release")
@@ -275,7 +282,7 @@ class BuildConfigManifestTests(unittest.TestCase):
         release, wheel_name, fake_download = self._release_with_wheel(["8.0", "9.0", "10.0"])
         manifest_blob = json.dumps(
             generate_matrix.component_build_manifest(
-                self.versions, "demo", "3.12", DEMO_TORCH
+                self.versions, "demo", "3.12", DEMO_TORCH, DEMO_CUDA
             ),
             indent=2,
             sort_keys=True,
@@ -946,7 +953,7 @@ class CudaVersionFilterTests(unittest.TestCase):
             "v1.2.3",
             "demo",
             generate_matrix.component_combos_for_release(
-                self.versions, "demo", "3.12", DEMO_TORCH
+                self.versions, "demo", "3.12", DEMO_TORCH, DEMO_CUDA
             ),
         )
         self.assertEqual(["cu130/torch2.11"], build_index.release_worlds(title))
@@ -970,20 +977,55 @@ class CudaVersionFilterTests(unittest.TestCase):
         self.assertIn("not in build_matrix", str(ctx.exception))
         self.assertIn("13.9.9", str(ctx.exception))
 
-    def test_spanning_two_cudas_for_one_python_torch_is_rejected(self) -> None:
+    def test_two_cudas_for_one_python_torch_get_distinct_releases(self) -> None:
+        # With CUDA keyed into the release tag, a component may build one
+        # (Python, torch) against both 13.0 and 13.2: each lands on its own
+        # tag, so the second build can never clobber the first's wheels.
         self.versions["components"]["demo"]["cuda_versions"] = [
             "13.2.2",
             "13.0.2",
         ]
-        with self.assertRaises(SystemExit) as ctx:
-            generate_matrix.build_full_matrix(self.versions, ["demo"])
-        self.assertIn("more than one CUDA", str(ctx.exception))
-        # The release-metadata path must fail closed the same way.
-        with self.assertRaises(SystemExit) as ctx2:
-            generate_matrix.component_combos_for_release(
-                self.versions, "demo", "3.12", DEMO_TORCH
+        keys = [
+            (cuda, generate_matrix.release_tag("demo", "v1.2.3", py, torch, cuda))
+            for py, torch, cuda in generate_matrix.component_release_keys(
+                self.versions, "demo"
             )
-        self.assertIn("more than one CUDA", str(ctx2.exception))
+            if py == "3.12" and torch == DEMO_TORCH
+        ]
+        self.assertEqual(
+            [
+                ("13.2.2", f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}-cu132"),
+                ("13.0.2", f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}-cu130"),
+            ],
+            keys,
+        )
+        # Each cuda-keyed release groups only that CUDA's arch rows.
+        self.assertEqual(
+            2,
+            len(
+                generate_matrix.component_combos_for_release(
+                    self.versions, "demo", "3.12", DEMO_TORCH, "13.2.2"
+                )
+            ),
+        )
+        self.assertEqual(
+            2,
+            len(
+                generate_matrix.component_combos_for_release(
+                    self.versions, "demo", "3.12", DEMO_TORCH, "13.0.2"
+                )
+            ),
+        )
+        # release_meta must be told which cuda when more than one exists.
+        with patch("generate_matrix.build_input_fingerprint", return_value=STUB_FINGERPRINT):
+            with self.assertRaises(SystemExit):
+                release_meta.component_release_meta(
+                    self.versions, "demo", "3.12", DEMO_TORCH
+                )
+            meta = release_meta.component_release_meta(
+                self.versions, "demo", "3.12", DEMO_TORCH, "13.2.2"
+            )
+        self.assertTrue(meta["tag"].endswith("-cu132"))
 
 
 class PerPythonReleaseTests(unittest.TestCase):
@@ -1024,10 +1066,10 @@ class PerPythonReleaseTests(unittest.TestCase):
 
     def test_tag_spells_out_python_and_torch(self) -> None:
         tags = {(r["arch"], r["python"]): r["release_tag"] for r in self.entries}
-        self.assertEqual(f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}", tags[("x86_64", "3.12")])
-        self.assertEqual(f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}", tags[("aarch64", "3.12")])
-        self.assertEqual(f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}", tags[("x86_64", "3.11")])
-        self.assertEqual(f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}", tags[("aarch64", "3.11")])
+        self.assertEqual(f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}-cu130", tags[("x86_64", "3.12")])
+        self.assertEqual(f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}-cu130", tags[("aarch64", "3.12")])
+        self.assertEqual(f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}-cu130", tags[("x86_64", "3.11")])
+        self.assertEqual(f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}-cu130", tags[("aarch64", "3.11")])
         # Both arches of one interpreter share a release; the wheel filename's
         # platform tag is what tells them apart inside it.
         self.assertEqual(2, len(set(tags.values())))
@@ -1041,12 +1083,15 @@ class PerPythonReleaseTests(unittest.TestCase):
         versions["build_matrix"].append(newer)
 
         self.assertEqual(
-            [("3.12", DEMO_TORCH), ("3.12", "2.13.0")],
+            [("3.12", DEMO_TORCH, "13.0.2"), ("3.12", "2.13.0", "13.0.2")],
             generate_matrix.component_release_keys(versions, "demo"),
         )
         tags = {r["release_tag"] for r in generate_matrix.build_full_matrix(versions, ["demo"])}
         self.assertEqual(
-            {f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}", "demo-v1.2.3-py3.12-torch2.13.0"},
+            {
+                f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}-cu130",
+                "demo-v1.2.3-py3.12-torch2.13.0-cu130",
+            },
             tags,
         )
 
@@ -1055,7 +1100,7 @@ class PerPythonReleaseTests(unittest.TestCase):
             "v1.2.3",
             "demo",
             generate_matrix.component_combos_for_release(
-                self.versions, "demo", "3.12", DEMO_TORCH
+                self.versions, "demo", "3.12", DEMO_TORCH, DEMO_CUDA
             ),
         )
         self.assertEqual(
@@ -1067,7 +1112,7 @@ class PerPythonReleaseTests(unittest.TestCase):
             "v1.2.3",
             "demo",
             generate_matrix.component_combos_for_release(
-                self.versions, "demo", "3.11", DEMO_TORCH
+                self.versions, "demo", "3.11", DEMO_TORCH, DEMO_CUDA
             ),
         )
         self.assertEqual(
@@ -1079,7 +1124,7 @@ class PerPythonReleaseTests(unittest.TestCase):
     def test_manifest_is_scoped_to_one_python(self) -> None:
         for python in ("3.11", "3.12"):
             manifest = generate_matrix.component_build_manifest(
-                self.versions, "demo", python, DEMO_TORCH
+                self.versions, "demo", python, DEMO_TORCH, DEMO_CUDA
             )
             self.assertEqual(python, manifest["python"])
             self.assertEqual(2, len(manifest["builds"]))
@@ -1090,7 +1135,7 @@ class PerPythonReleaseTests(unittest.TestCase):
         self, inspect_release
     ) -> None:
         release312 = make_release(self.versions, self.PY312_WHEELS, python="3.12")
-        tag312 = f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}"
+        tag312 = f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}-cu130"
         seen_tags = []
 
         def fake_inspect(_repo, tag):
@@ -1110,13 +1155,14 @@ class PerPythonReleaseTests(unittest.TestCase):
         # Each per-python release is inspected once, shared by both arch rows.
         self.assertEqual(2, inspect_release.call_count)
         self.assertEqual(
-            [f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}", tag312], sorted(seen_tags)
+            [f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}-cu130", tag312],
+            sorted(seen_tags),
         )
 
     def test_one_python_release_never_covers_the_other_python_row(self) -> None:
         release311 = make_release(self.versions, self.PY311_WHEELS, python="3.11")
         combo312 = generate_matrix.component_combos_for_release(
-            self.versions, "demo", "3.12", DEMO_TORCH
+            self.versions, "demo", "3.12", DEMO_TORCH, DEMO_CUDA
         )[0]
         covered, reason = generate_matrix.release_covers_combo(
             self.versions, "demo", combo312, release311, repo=None, verify_wheels=False
@@ -1126,9 +1172,10 @@ class PerPythonReleaseTests(unittest.TestCase):
 
     def test_release_meta_explicit_python(self) -> None:
         meta = release_meta.component_release_meta(self.versions, "demo", "3.11")
-        self.assertEqual(f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}", meta["tag"])
+        self.assertEqual(f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}-cu130", meta["tag"])
         self.assertEqual("3.11", meta["python"])
         self.assertEqual(DEMO_TORCH, meta["torch"])
+        self.assertEqual(DEMO_CUDA, meta["cuda"])
         self.assertIn("py3.11", meta["title"])
         self.assertEqual(2, len(meta["manifest"]["builds"]))
 
@@ -1152,7 +1199,10 @@ class PerPythonReleaseTests(unittest.TestCase):
     def test_release_meta_all_emits_one_record_per_opted_in_python(self) -> None:
         entries = release_meta.release_meta_entries(self.versions, ["demo"], "all")
         self.assertEqual(
-            [f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}", f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}"],
+            [
+                f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}-cu130",
+                f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}-cu130",
+            ],
             [entry["tag"] for entry in entries],
         )
 
@@ -1167,7 +1217,7 @@ class PerPythonReleaseTests(unittest.TestCase):
             self.versions, ["demo", "bridge"], "3.11"
         )
         self.assertEqual(
-            [f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}"],
+            [f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}-cu130"],
             [entry["tag"] for entry in entries311],
         )
         entries_all = release_meta.release_meta_entries(
@@ -1175,9 +1225,9 @@ class PerPythonReleaseTests(unittest.TestCase):
         )
         self.assertEqual(
             [
-                f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}",
-                f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}",
-                f"bridge-v9.9.9-py3.12-torch{DEMO_TORCH}",
+                f"demo-v1.2.3-py3.11-torch{DEMO_TORCH}-cu130",
+                f"demo-v1.2.3-py3.12-torch{DEMO_TORCH}-cu130",
+                f"bridge-v9.9.9-py3.12-torch{DEMO_TORCH}-cu130",
             ],
             [entry["tag"] for entry in entries_all],
         )

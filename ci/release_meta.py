@@ -57,6 +57,7 @@ from generate_matrix import (
     BUILD_MANIFEST_FILENAME,
     component_build_manifest,
     component_combos_for_release,
+    component_cuda_for,
     component_names,
     component_python_versions,
     component_release_keys,
@@ -96,8 +97,40 @@ def resolve_torch(
     return available[0]
 
 
+def resolve_cuda(
+    versions: Dict[str, Any],
+    component: str,
+    python: str,
+    torch: str,
+    cuda: Optional[str],
+) -> str:
+    """The CUDA version a release is for, inferred when not passed explicitly.
+
+    Each active component pins one CUDA per (Python, torch), so the
+    _build.yml path (which passes --torch but no --cuda under setup-python)
+    resolves it unambiguously; a historical/multi-CUDA matrix must name it.
+    """
+    available = [
+        c
+        for py, t, c in component_release_keys(versions, component)
+        if py == python and t == torch
+    ]
+    if cuda is not None:
+        if str(cuda) not in available:
+            raise SystemExit(
+                f"Component {component!r} does not build Python {python} / torch {torch} "
+                f"against CUDA {cuda}. It builds: {', '.join(available) or '(nothing)'}."
+            )
+        return str(cuda)
+    return component_cuda_for(versions, component, python, torch)
+
+
 def component_release_meta(
-    versions: Dict[str, Any], component: str, python: str, torch: Optional[str] = None
+    versions: Dict[str, Any],
+    component: str,
+    python: str,
+    torch: Optional[str] = None,
+    cuda: Optional[str] = None,
 ) -> Dict[str, Any]:
     cfg = get_component(versions, component)
     ref = str(cfg["ref"])
@@ -108,19 +141,21 @@ def component_release_meta(
             f"It builds for: {available or '(nothing)'}."
         )
     torch = resolve_torch(versions, component, python, torch)
-    combos = component_combos_for_release(versions, component, python, torch)
+    cuda = resolve_cuda(versions, component, python, torch, cuda)
+    combos = component_combos_for_release(versions, component, python, torch, cuda)
     return {
         "component": component,
         "python": str(python),
         "torch": torch,
+        "cuda": cuda,
         "ref": ref,
-        "tag": release_tag(component, ref, python, torch),
+        "tag": release_tag(component, ref, python, torch, cuda),
         "title": release_title(ref, component, combos),
-        "notes": format_release_notes(versions, component, python, torch),
+        "notes": format_release_notes(versions, component, python, torch, cuda),
         # Machine-readable build snapshot uploaded as a release asset
         # (BUILD_MANIFEST_FILENAME); the notes above embed the same JSON as a
         # fallback for older skip-detection code.
-        "manifest": component_build_manifest(versions, component, python, torch),
+        "manifest": component_build_manifest(versions, component, python, torch, cuda),
         "manifest_asset": BUILD_MANIFEST_FILENAME,
     }
 
@@ -130,23 +165,25 @@ def release_meta_entries(
     components: List[str],
     python: str,
     torch: Optional[str] = None,
+    cuda: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """One metadata record per release the given components publish.
 
     With python == "all" every component contributes one record per
-    (interpreter, torch) pair it opts into; otherwise components that don't
-    opt into that interpreter are skipped (an explicitly named such
+    (interpreter, torch, CUDA) tuple it opts into; otherwise components that
+    don't opt into that interpreter are skipped (an explicitly named such
     component is rejected by main() before reaching here).
     """
     if python == "all":
         return [
-            component_release_meta(versions, name, py, release_torch)
+            component_release_meta(versions, name, py, release_torch, release_cuda)
             for name in components
-            for py, release_torch in component_release_keys(versions, name)
-            if torch is None or release_torch == torch
+            for py, release_torch, release_cuda in component_release_keys(versions, name)
+            if (torch is None or release_torch == torch)
+            and (cuda is None or release_cuda == cuda)
         ]
     return [
-        component_release_meta(versions, name, python, torch)
+        component_release_meta(versions, name, python, torch, cuda)
         for name in components
         if python in component_python_versions(versions, name)
     ]
@@ -176,6 +213,16 @@ def main() -> None:
             "the build_matrix pins for the selected interpreter, which is "
             "unambiguous unless the matrix builds that interpreter against "
             "several torch versions."
+        ),
+    )
+    parser.add_argument(
+        "--cuda",
+        default=None,
+        help=(
+            "Full CUDA version the release is for (e.g. 13.2.2). Defaults to the "
+            "single CUDA the build_matrix pins for the selected Python/torch "
+            "(unambiguous while each component opts into one CUDA); required if "
+            "a matrix ever builds one (Python, torch) against several."
         ),
     )
     parser.add_argument(
@@ -210,7 +257,9 @@ def main() -> None:
                 f"It builds for: {available or '(nothing)'}."
             )
 
-    entries = release_meta_entries(versions, components, python, args.torch)
+    entries = release_meta_entries(
+        versions, components, python, args.torch, args.cuda
+    )
     payload = json.dumps(entries)
     print(payload)
 
