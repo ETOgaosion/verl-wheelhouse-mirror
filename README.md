@@ -256,6 +256,17 @@ pip install --extra-index-url https://verl-project.github.io/verl-wheelhouse/sim
 `flashinfer` - its rehosted jit-cache/cubin data wheels are not yet published
 for cu132; every other component is under `cu132/torch2.13`.
 
+One component is deliberately present in **every** world: `megatron-bridge`
+is a pure-Python `py3-none-any` wheel with no CUDA payload, declared
+`world_agnostic: true` in `versions.yaml`. `ci/build_index.py` therefore
+mirrors all of its releases into each world, so an old pin (e.g.
+`megatron-bridge==0.5.2`, first built under cu130) keeps resolving from the
+current `cu132` index and from `/simple` after the default world moves.
+Versions coexist on one page (different filenames); the newest is the
+default and an exact `==<old>` still finds its wheel. This is an index-only
+mechanism and never applies to compiled kernels or to data wheels that only
+*name* `py3-none-any` (the flashinfer cubin/jit-cache wheels).
+
 The split is not cosmetic: two wheels of one component built against
 different torch or CUDA versions have the same filename *and* the same
 version, so one index cannot hold both and nothing in a plain

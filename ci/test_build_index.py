@@ -20,7 +20,15 @@ APEX_211 = asset(
     ["cu130/torch2.11"],
     url="https://example.invalid/old/apex-0.1-cp312-cp312-linux_x86_64.whl",
 )
-BRIDGE = asset("megatron_bridge-0.5.2-py3-none-any.whl", ["cu130/torch2.13"])
+BRIDGE_052 = asset("megatron_bridge-0.5.2-py3-none-any.whl", ["cu130/torch2.13"])
+BRIDGE_052_211 = asset(
+    "megatron_bridge-0.5.2-py3-none-any.whl",
+    ["cu130/torch2.11"],
+    url="https://example.invalid/old/megatron_bridge-0.5.2-py3-none-any.whl",
+)
+BRIDGE_062 = asset("megatron_bridge-0.6.2-py3-none-any.whl", ["cu132/torch2.13"])
+BRIDGE = BRIDGE_052
+AGNOSTIC = {"megatron-bridge"}
 
 
 class WorldParsingTests(unittest.TestCase):
@@ -59,8 +67,8 @@ class IndexLayoutTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.out = Path(self.tmp.name)
 
-    def build(self, assets, default="cu130/torch2.13"):
-        return build_index.build_index(assets, self.out, default)
+    def build(self, assets, default="cu130/torch2.13", agnostic=None):
+        return build_index.build_index(assets, self.out, default, agnostic or set())
 
     def test_each_world_gets_its_own_tree(self) -> None:
         self.build([APEX_213, APEX_211, BRIDGE])
@@ -101,6 +109,96 @@ class IndexLayoutTests(unittest.TestCase):
         landing = (self.out / "index.html").read_text()
         self.assertIn("cu130/torch2.13/simple/", landing)
         self.assertIn("cu130/torch2.11/simple/", landing)
+
+
+class WorldAgnosticTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = Path(self.tmp.name)
+
+    def _page(self, world, package="megatron-bridge"):
+        return (self.out / world / "simple" / package / "index.html").read_text()
+
+    def test_agnostic_old_version_is_mirrored_into_the_new_world(self) -> None:
+        # The 0.5.2 wheel was published under cu130; once the default world is
+        # cu132 it must still be installable from the cu132 index and /simple.
+        by_world = build_index.build_index(
+            [BRIDGE_052_211, BRIDGE_052, BRIDGE_062, APEX_213],
+            self.out,
+            "cu132/torch2.13",
+            AGNOSTIC,
+        )
+        for world in ("cu130/torch2.11", "cu130/torch2.13", "cu132/torch2.13"):
+            self.assertIn(world, by_world)
+            page = self._page(world)
+            self.assertIn("megatron_bridge-0.5.2-py3-none-any.whl", page)
+        # The current and default worlds carry BOTH versions: newest is the
+        # default, an exact ==0.5.2 pin still resolves.
+        cu132 = self._page("cu132/torch2.13")
+        self.assertIn("megatron_bridge-0.5.2-py3-none-any.whl", cu132)
+        self.assertIn("megatron_bridge-0.6.2-py3-none-any.whl", cu132)
+        simple = (self.out / "simple" / "megatron-bridge" / "index.html").read_text()
+        self.assertIn("megatron_bridge-0.5.2-py3-none-any.whl", simple)
+        self.assertIn("megatron_bridge-0.6.2-py3-none-any.whl", simple)
+
+    def test_compiled_wheels_are_not_cross_worlded(self) -> None:
+        build_index.build_index(
+            [APEX_213, APEX_211, BRIDGE_052, BRIDGE_062],
+            self.out,
+            "cu132/torch2.13",
+            AGNOSTIC,
+        )
+        apex_213 = self._page("cu130/torch2.13", "apex")
+        self.assertIn(APEX_213["url"], apex_213)
+        self.assertNotIn(APEX_211["url"], apex_213)
+        # apex never built for cu132, so the flag must not create an apex page.
+        self.assertFalse((self.out / "cu132/torch2.13/simple/apex").exists())
+
+    def test_non_universal_wheel_is_never_promoted(self) -> None:
+        # Even if a flagged distribution ships a platform wheel, it stays bound
+        # to its title worlds (guards against a flashinfer-cubin-style misuse).
+        compiled = asset("megatron_bridge-9.9-cp312-cp312-linux_x86_64.whl", ["cu130/torch2.13"])
+        build_index.build_index(
+            [compiled, BRIDGE_062], self.out, "cu132/torch2.13", AGNOSTIC
+        )
+        # The platform wheel is not promoted; the universal 0.6.2 is mirrored.
+        cu132 = self._page("cu132/torch2.13")
+        self.assertNotIn("linux_x86_64", cu132)
+        self.assertIn("megatron_bridge-0.6.2-py3-none-any.whl", cu132)
+
+    def test_assign_worlds_helper(self) -> None:
+        worlds = ["cu130/torch2.11", "cu130/torch2.13", "cu132/torch2.13"]
+        self.assertEqual(
+            worlds,
+            build_index.assign_worlds(BRIDGE_052, worlds, AGNOSTIC),
+        )
+        self.assertEqual(
+            ["cu130/torch2.13"],
+            build_index.assign_worlds(APEX_213, worlds, AGNOSTIC),
+        )
+        # Without the flag the universal wheel keeps its declared worlds.
+        self.assertEqual(["cu130/torch2.13"], build_index.assign_worlds(BRIDGE_052, worlds, set()))
+
+    def test_is_universal_wheel(self) -> None:
+        self.assertTrue(build_index.is_universal_wheel("megatron_bridge-0.5.2-py3-none-any.whl"))
+        self.assertFalse(build_index.is_universal_wheel("apex-0.1-cp312-cp312-linux_x86_64.whl"))
+
+    def test_world_agnostic_distributions_from_versions(self) -> None:
+        versions = {
+            "components": {
+                "megatron-bridge": {
+                    "wheel_packages": ["megatron-bridge"],
+                    "world_agnostic": True,
+                },
+                "flashinfer": {
+                    "wheel_packages": ["flashinfer-python", "flashinfer-cubin"],
+                    # data wheels must not be promoted even if someone flipped this
+                },
+                "apex": {"wheel_packages": ["apex"]},
+            }
+        }
+        self.assertEqual({"megatron-bridge"}, build_index.world_agnostic_distributions(versions))
 
 
 class DefaultWorldTests(unittest.TestCase):

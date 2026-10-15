@@ -235,6 +235,14 @@ verl_reference_versions:
 #                  Standard ubuntu-24.04 runners cap at 360 min; use a larger
 #                  or self-hosted runner when build_timeout exceeds ~5h45m.
 # extra_env:       additional build-script-specific environment variables.
+# world_agnostic:  index-only flag for a genuinely CUDA/torch-independent
+#                  distribution whose wheels are py3-none-any with no compiled
+#                  or data payload (only megatron-bridge today). ci/build_index.py
+#                  then mirrors every release of that distribution into every
+#                  per-CUDA/torch index world, so old versions stay resolvable
+#                  after the default world moves. Build/skip logic ignores it;
+#                  it never applies to compiled kernels or to data wheels that
+#                  merely name py3-none-any (e.g. flashinfer-cubin/-jit-cache).
 components:
   flash-attention:
     path: flash-attention
@@ -387,6 +395,15 @@ components:
     # without cuda, so building it from both 13.0 and 13.2 rows would put two
     # cuda worlds on one tag. Rides the current 13.2 world verl consumes.
     cuda_versions: ["13.2.2"]
+    # The wheel is genuinely CUDA/torch-independent (pure Python, no data
+    # payload), so ci/build_index.py mirrors EVERY release of this
+    # distribution into every index world. Without it, moving the default
+    # world to cu132 would drop older versions (e.g. 0.5.2, first published
+    # under cu130) from /simple and break downstream envs pinned to ==0.5.2.
+    # Versions coexist (distinct filenames); the newest stays the default and
+    # an exact old pin still resolves. Do NOT set this on py3-none-any wheels
+    # that carry CUDA payloads (flashinfer-cubin/-jit-cache).
+    world_agnostic: true
     torch_cuda_arch_list: null # pure-Python wheel: no CUDA gencode flags
     requires_cudnn: false
     max_jobs: 1

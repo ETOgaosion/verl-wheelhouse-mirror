@@ -24,6 +24,18 @@ Which world a release belongs to is read from its title, which
 ci/release_meta.py generates with a "cu<cuda> py<python> torch<torch>"
 segment per build.
 
+Exception: a small set of genuinely CUDA/torch-independent distributions -
+pure-Python `py3-none-any` wheels with no compiled or data payload - are
+declared `world_agnostic: true` in versions.yaml (currently megatron-bridge).
+Every release of such a distribution is mirrored into EVERY world, so a
+consumer pinned to an older version keeps resolving it after the default
+world moves (e.g. megatron-bridge 0.5.2 stays installable from the cu132
+index even though it was first published under cu130). Different versions
+have different filenames, so they coexist on one page; the newest is the
+default and an exact `==<old>` pin still finds its wheel. This must not be
+used for wheels that merely *name* py3-none-any but carry CUDA payloads
+(flashinfer-cubin/jit-cache are CUDA-specific data despite the tag).
+
 Usage:
     python ci/build_index.py --repo <owner>/<repo> --out-dir _site
 
@@ -63,6 +75,42 @@ _TITLE_SEGMENT_RE = re.compile(r"cu(?P<cuda>[\w.]+)\s+py(?P<python>[\w.]+)\s+tor
 def normalize(name: str) -> str:
     """PEP 503 project-name normalization."""
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def wheel_distribution(filename: str) -> str:
+    """PEP 503-normalized distribution name from a wheel filename."""
+    return normalize(filename.split("-")[0])
+
+
+def is_universal_wheel(filename: str) -> bool:
+    """True for a py3-none-any (interpreter/ABI/platform-independent) wheel."""
+    return filename[: -len(".whl")].rsplit("-", 1)[-1] == "any"
+
+
+def world_agnostic_distributions(versions: Dict[str, object]) -> set:
+    """Normalized distributions mirrored into every index world.
+
+    Sourced from `world_agnostic: true` components in versions.yaml and their
+    `wheel_packages`. Only their py3-none-any wheels are actually mirrored
+    (see assign_worlds); a compiled/data wheel is never promoted even if the
+    flag is set, so flashinfer-style data wheels stay world-bound.
+    """
+    agnostic: set = set()
+    for cfg in versions.get("components", {}).values():  # type: ignore[union-attr]
+        if cfg.get("world_agnostic") is True:  # type: ignore[union-attr]
+            agnostic.update(normalize(p) for p in cfg.get("wheel_packages", []))  # type: ignore[union-attr]
+    return agnostic
+
+
+def assign_worlds(asset: WheelAsset, all_worlds: List[str], agnostic: set) -> List[str]:
+    """Index worlds one asset belongs to.
+
+    World-agnostic py3-none-any wheels go to every world; every other wheel
+    stays on the world(s) its release title declares.
+    """
+    if is_universal_wheel(asset["name"]) and wheel_distribution(asset["name"]) in agnostic:
+        return list(all_worlds)
+    return asset["worlds"]
 
 
 def cuda_tag(cuda: str) -> str:
@@ -135,10 +183,14 @@ def list_wheel_assets(repo: str) -> List[WheelAsset]:
     return assets
 
 
-def group_by_world(assets: List[WheelAsset]) -> Dict[str, List[WheelAsset]]:
+def group_by_world(
+    assets: List[WheelAsset],
+    all_worlds: List[str],
+    agnostic: set,
+) -> Dict[str, List[WheelAsset]]:
     by_world: Dict[str, List[WheelAsset]] = defaultdict(list)
     for asset in assets:
-        for world in asset["worlds"]:
+        for world in assign_worlds(asset, all_worlds, agnostic):
             by_world[world].append(asset)
     return by_world
 
@@ -190,11 +242,20 @@ def write_simple_tree(assets: List[WheelAsset], simple_dir: Path, label: str) ->
     return by_package
 
 
+def all_declared_worlds(assets: List[WheelAsset]) -> List[str]:
+    """Every world any release title declares, in first-seen order."""
+    return list(dict.fromkeys(world for asset in assets for world in asset["worlds"]))
+
+
 def build_index(
-    assets: List[WheelAsset], out_dir: Path, default_world: str
+    assets: List[WheelAsset],
+    out_dir: Path,
+    default_world: str,
+    agnostic: set,
 ) -> Dict[str, List[WheelAsset]]:
     """Publish one index per CUDA/torch world, plus the default-world alias."""
-    by_world = group_by_world(assets)
+    declared = all_declared_worlds(assets)
+    by_world = group_by_world(assets, declared, agnostic)
 
     for world, world_assets in by_world.items():
         write_simple_tree(
@@ -262,14 +323,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    world = args.default_world or default_world(load_versions())
+    versions = load_versions()
+    world = args.default_world or default_world(versions)
+    agnostic = world_agnostic_distributions(versions)
+    if agnostic:
+        print(f"World-agnostic distributions (mirrored into every world): "
+              f"{', '.join(sorted(agnostic))}", file=sys.stderr)
 
     assets = list_wheel_assets(args.repo)
     if not assets:
         print("No .whl release assets found yet; publishing an empty index.", file=sys.stderr)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    by_world = build_index(assets, args.out_dir, world)
+    by_world = build_index(assets, args.out_dir, world, agnostic)
     if world not in by_world:
         print(
             f"No release wheels for the default world {world!r}; /simple/ is empty "
