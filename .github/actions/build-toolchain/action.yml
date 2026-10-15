@@ -90,6 +90,19 @@ runs:
         pip install --upgrade pip
         TORCH_CUDA_TAG="cu$(echo '${{ inputs.cuda-version }}' | cut -d. -f1,2 | tr -d '.')"
         TORCH_INDEX="https://download.pytorch.org/whl/${TORCH_CUDA_TAG}"
+        # Drop any torch already on this interpreter BEFORE the index-pinned
+        # install. Self-hosted x86_64 runners persist between jobs, so a build
+        # from the previous CUDA matrix leaves torch 2.13.0+cu130 installed;
+        # `pip install torch==2.13.0 --index-url .../cu132` then prints
+        # "Requirement already satisfied" and keeps +cu130, because pip matches
+        # on the version number and ignores the +cu local tag. apex's
+        # check_cuda_torch_binary_vs_bare_metal then sees torch.version.cuda=13.0
+        # against the 13.2 nvcc and raises, while kernels without that guard
+        # silently compile against the wrong torch. Uninstalling forces the
+        # wheel for THIS cuda index; it is a no-op on the throwaway
+        # GitHub-hosted runners. The transitive nvidia-* libs are realigned by
+        # the resolver when the fresh cu132 torch's pins do not match.
+        pip uninstall -y torch torchvision torchaudio || true
         # torch / torchvision are the ABI-coupled core; both exist on cu130 and
         # cu132 for the pinned versions, so they always come from the CUDA index.
         pip install \
@@ -109,4 +122,8 @@ runs:
             echo "::warning::torchaudio ${{ inputs.torch-audio-version }} unavailable on ${TORCH_INDEX} and PyPI; continuing - no build script imports it"
           fi
         fi
-        python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+        # Fail closed if the resolved torch was built for a different CUDA than
+        # the toolkit provisioned above - the self-hosted stale-+cu130 case this
+        # step now uninstalls around. A minor mismatch here is what apex's own
+        # setup.py rejects, so surface it at provisioning with a clear message.
+        python -c "import torch; want='${TORCH_CUDA_TAG}'; got='cu'+''.join((torch.version.cuda or '').split('.')[:2]); assert got==want, f'torch built for {got} ({torch.__version__}) but the toolchain provisions {want}; stale preinstalled torch?'; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
